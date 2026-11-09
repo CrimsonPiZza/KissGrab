@@ -1,0 +1,4 @@
+kisskh-downloader>=0.2.4
+# Optional (recommended for automatic kkey token generation):
+# playwright
+
