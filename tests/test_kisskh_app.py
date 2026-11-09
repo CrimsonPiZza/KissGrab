@@ -140,11 +140,12 @@ class TestConfigAndEnv(unittest.TestCase):
                 os.environ.pop("KISSKH_BASE_URL", None)
                 cfg = AppConfig.load(config_path=cfg_path, env_path=env_path)
                 self.assertEqual(cfg.base_url, DEFAULT_BASE_URL)
+                self.assertEqual(cfg.subtitle_mode, "embed")
                 self.assertEqual(os.environ["KISSKH_BASE_URL"], "https://kisskh.do")
 
                 cfg.quality = "720p"
                 cfg.sub_langs = ["en", "id"]
-                cfg.subtitle_mode = "embed"
+                cfg.subtitle_mode = "burn"
                 cfg.keep_separate_srt = True
                 cfg.add_recent_drama(4608, "A Business Proposal", 12, "Completed", config_path=cfg_path)
                 cfg.add_recent_drama(5043, "Alchemy of Souls", 20, "Completed", config_path=cfg_path)
@@ -153,7 +154,7 @@ class TestConfigAndEnv(unittest.TestCase):
                 loaded = AppConfig.load(config_path=cfg_path, env_path=env_path)
                 self.assertEqual(loaded.quality, "720p")
                 self.assertEqual(loaded.sub_langs, ["en", "id"])
-                self.assertEqual(loaded.subtitle_mode, "embed")
+                self.assertEqual(loaded.subtitle_mode, "burn")
                 self.assertTrue(loaded.keep_separate_srt)
                 self.assertEqual([d.id for d in loaded.recent_dramas], [4608, 5043])
 

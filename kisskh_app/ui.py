@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -42,15 +43,27 @@ def _echo(text: str = "") -> None:
     click.echo(text)
 
 
+def _clear_screen() -> None:
+    click.clear()
+
+
 def _divider(char: str = "─", width: int = 64) -> None:
     _echo(_c(char * width, dim=True))
 
 
-def _banner(title: str, width: int = 64) -> None:
-    _echo()
+def _banner(title: str, width: int = 64, clear: bool = True) -> None:
+    if clear:
+        _clear_screen()
     _echo(_c("=" * width, fg="cyan"))
     _echo(_c(f"  {title}", fg="cyan", bold=True))
     _echo(_c("=" * width, fg="cyan"))
+
+
+def _show_flash(flash: tuple[str, str] | None) -> None:
+    if flash:
+        msg, color = flash
+        _echo(_c(f"  {msg}", fg=color, bold=(color == "red")))
+        _divider()
 
 
 def _prompt(label: str, default: str | None = None) -> str:
@@ -110,21 +123,16 @@ def _configure_manual_kkeys() -> bool:
     _echo("Paste your kkey tokens (leave blank to cancel):")
     stream_key = _prompt("  KISSKH_STREAM_KEY : ")
     if not stream_key:
-        _echo(_c("Cancelled.", dim=True))
         return False
     sub_key = _prompt("  KISSKH_SUB_KEY    : ")
     if not sub_key:
-        _echo(_c("Cancelled (both stream and sub keys are needed).", dim=True))
         return False
 
     update_env_vars({"KISSKH_STREAM_KEY": stream_key, "KISSKH_SUB_KEY": sub_key})
-    _echo(_c("Saved kkeys to .env and activated for this session.", fg="green"))
     return True
 
 
-def _configure_decrypt_keys(config: AppConfig) -> None:
-    import os
-
+def _configure_decrypt_keys(config: AppConfig) -> bool:
     _echo()
     _echo("Subtitle AES-CBC Decryption Keys (saved to .env):")
     current_key = os.getenv("KISSKH_KEY", "")
@@ -140,11 +148,12 @@ def _configure_decrypt_keys(config: AppConfig) -> None:
         updates["KISSKH_INITIALIZATION_VECTOR"] = new_iv
     if updates:
         update_env_vars(updates)
-        _echo(_c("Updated subtitle decryption keys in .env.", fg="green"))
 
     if os.getenv("KISSKH_KEY") and os.getenv("KISSKH_INITIALIZATION_VECTOR"):
         config.decrypt_subtitle = True
         config.save()
+        return True
+    return False
 
 
 def _pick_quality(current: str) -> str:
@@ -160,7 +169,6 @@ def _pick_quality(current: str) -> str:
         return VALID_QUALITIES[int(choice) - 1]
     if choice in VALID_QUALITIES:
         return choice
-    _echo(_c("Invalid quality selection; keeping current.", fg="yellow"))
     return current
 
 
@@ -175,8 +183,7 @@ def _pick_sub_langs(current: list[str]) -> list[str]:
         return []
     if lowered == "all":
         return ["all"]
-    langs = [part.strip() for part in raw.split(",") if part.strip()]
-    return langs
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def _pick_output_dir(current: str) -> str:
@@ -216,7 +223,6 @@ def _pick_subtitle_mode(current: str) -> str:
         return options[int(choice) - 1][0]
     if choice in VALID_SUBTITLE_MODES:
         return choice
-    _echo(_c("Invalid selection; keeping current.", fg="yellow"))
     return current
 
 
@@ -249,26 +255,27 @@ class KissKHConsoleApp:
 
     def _set_download_logging(self, active: bool) -> None:
         root_logger = logging.getLogger("kisskh_downloader")
-        if not active:
+        if active and self.config.verbose:
+            if not logging.getLogger().handlers:
+                logging.basicConfig(format="  %(levelname)s: %(message)s", level=logging.DEBUG)
+            root_logger.setLevel(logging.DEBUG)
+        else:
             root_logger.setLevel(logging.WARNING)
-            return
-        level = logging.DEBUG if self.config.verbose else logging.INFO
-        if not logging.getLogger().handlers:
-            logging.basicConfig(format="  %(levelname)s: %(message)s", level=level)
-        root_logger.setLevel(level)
 
     def run(self, initial_query: str | None = None) -> None:
         self._set_download_logging(False)
+        flash: tuple[str, str] | None = None
         try:
             if initial_query:
                 self._search_or_url_flow(initial_input=initial_query)
 
             while True:
-                choice = self._show_main_menu()
+                choice = self._show_main_menu(flash=flash)
+                flash = None
                 if choice in {"", "1"}:
                     self._search_or_url_flow()
                 elif choice == "2":
-                    self._recent_series_flow()
+                    flash = self._recent_series_flow()
                 elif choice == "3":
                     self._settings_menu()
                 elif choice == "4":
@@ -277,30 +284,31 @@ class KissKHConsoleApp:
                     _echo(_c("Goodbye!", fg="cyan"))
                     break
                 else:
-                    _echo(_c("Unknown option. Please choose 1-5.", fg="yellow"))
+                    flash = ("Unknown option. Choose 1-5.", "yellow")
         except KeyboardInterrupt:
             _echo(_c("\nExiting cleanly.", dim=True))
         finally:
             self.service.close()
 
-    def _show_main_menu(self) -> str:
+    def _show_main_menu(self, flash: tuple[str, str] | None = None) -> str:
         auth = check_auth_status()
         auth_color = "green" if auth.is_ready else "yellow"
 
         _banner("KissKH Episode Range Downloader")
-        _echo(f"  Site Source   : {_c(self.config.base_url, fg='green', bold=True)}")
+        _echo(f"  Source  : {_c(self.config.base_url, fg='green', bold=True)}")
         _echo(
-            f"  Quality       : {_c(self.config.quality, bold=True)}"
-            f"   | Subtitles : {_c(self.config.formatted_sub_langs(), bold=True)}"
+            f"  Format  : {_c(self.config.quality, bold=True)}"
+            f" | Subs: {_c(self.config.formatted_sub_langs(), bold=True)}"
             f" ({self.config.formatted_subtitle_mode()})"
         )
         _echo(
-            f"  Mode          : {'Subtitles Only' if self.config.subs_only else 'Video + Subtitles'}"
-            f"   | Skip Existing : {'On' if self.config.skip_existing else 'Off'}"
+            f"  Mode    : {'Subtitles Only' if self.config.subs_only else 'Video + Subtitles'}"
+            f" | Skip Existing: {'On' if self.config.skip_existing else 'Off'}"
         )
-        _echo(f"  Output Folder : {self.config.resolved_output_dir()}")
-        _echo(f"  Auth (kkey)   : {_c(auth.summary_text(), fg=auth_color)}")
+        _echo(f"  Output  : {self.config.resolved_output_dir()}")
+        _echo(f"  Auth    : {_c(auth.summary_text(), fg=auth_color)}")
         _divider()
+        _show_flash(flash)
 
         recent_count = len(self.config.recent_dramas)
         recent_hint = f" ({recent_count})" if recent_count else " (empty)"
@@ -315,17 +323,20 @@ class KissKHConsoleApp:
 
     def _search_or_url_flow(self, initial_input: str | None = None) -> None:
         raw_input = initial_input
+        flash: tuple[str, str] | None = None
         while True:
             if not raw_input:
-                _echo()
-                raw_input = _prompt("Enter drama name or KissKH URL (or 'b' for menu): ")
+                _banner("Search or Open URL")
+                _show_flash(flash)
+                flash = None
+                raw_input = _prompt("Drama name or KissKH URL (or 'b' back): ")
             if not raw_input or raw_input.lower() in {"b", "back"}:
                 return
 
             try:
                 parsed = parse_user_input(raw_input)
             except ValueError as exc:
-                _echo(_c(f"  Error: {exc}", fg="red"))
+                flash = (f"Error: {exc}", "red")
                 raw_input = None
                 continue
 
@@ -334,7 +345,7 @@ class KissKHConsoleApp:
                 try:
                     drama = self.service.get_drama(parsed.drama_id)
                 except requests.RequestException as exc:
-                    _echo(_c(f"  Failed to fetch drama from {self.config.base_url}: {exc}", fg="red"))
+                    flash = (f"Failed to fetch drama: {exc}", "red")
                     raw_input = None
                     continue
                 self.config.add_recent_drama(
@@ -351,16 +362,16 @@ class KissKHConsoleApp:
             try:
                 results = self.service.search(parsed.query)
             except requests.RequestException as exc:
-                _echo(_c(f"  Search failed ({self.config.base_url}): {exc}", fg="red"))
+                flash = (f"Search failed: {exc}", "red")
                 raw_input = None
                 continue
 
             if not results:
-                _echo(_c("  No dramas matched your search. Try another title or paste a URL.", fg="yellow"))
+                flash = (f"No dramas matched '{parsed.query}'. Try another title or paste a URL.", "yellow")
                 raw_input = None
                 continue
 
-            selected = self._pick_search_result(results)
+            selected = self._pick_search_result(results, query=parsed.query)
             if selected == "re_search":
                 raw_input = None
                 continue
@@ -371,7 +382,7 @@ class KissKHConsoleApp:
             try:
                 drama = self.service.get_drama(selected.id)
             except requests.RequestException as exc:
-                _echo(_c(f"  Failed to load drama details: {exc}", fg="red"))
+                flash = (f"Failed to load drama details: {exc}", "red")
                 raw_input = None
                 continue
 
@@ -384,17 +395,26 @@ class KissKHConsoleApp:
             self._download_drama_flow(drama)
             return
 
-    def _pick_search_result(self, results: list[DramaInfo]) -> DramaInfo | str | None:
-        _echo()
-        _echo(f"  {'#':>2}  {'Title':<42} {'Eps':>4}  {'Label'}")
-        _divider()
-        for idx, item in enumerate(results, start=1):
-            title = item.title if len(item.title) <= 42 else item.title[:39] + "..."
-            _echo(f"  {idx:>2}. {title:<42} {item.episodes_count:>4}  {item.label}")
-        _echo()
+    def _pick_search_result(
+        self,
+        results: list[DramaInfo],
+        query: str = "",
+    ) -> DramaInfo | str | None:
+        flash: tuple[str, str] | None = None
         while True:
+            header = f"Search Results: {query}" if query else "Search Results"
+            _banner(header)
+            _echo(f"  {'#':>2}  {'Title':<42} {'Eps':>4}  {'Label'}")
+            _divider()
+            for idx, item in enumerate(results, start=1):
+                title = item.title if len(item.title) <= 42 else item.title[:39] + "..."
+                _echo(f"  {idx:>2}. {title:<42} {item.episodes_count:>4}  {item.label}")
+            _divider()
+            _show_flash(flash)
+            flash = None
+
             raw = _prompt(
-                f"Pick # [1-{len(results)}, Enter=1] ('s' new search, 'b' back): ",
+                f"Pick # [1-{len(results)}, Enter=1] ('s' search again, 'b' back): ",
                 default="1",
             ).lower()
             if raw in {"b", "back"}:
@@ -403,47 +423,49 @@ class KissKHConsoleApp:
                 return "re_search"
             if raw.isdigit() and 1 <= int(raw) <= len(results):
                 return results[int(raw) - 1]
-            _echo(_c(f"  Please enter a number from 1 to {len(results)}.", fg="yellow"))
+            flash = (f"Please enter a number from 1 to {len(results)}.", "yellow")
 
-    def _recent_series_flow(self) -> None:
+    def _recent_series_flow(self) -> tuple[str, str] | None:
         if not self.config.recent_dramas:
-            _echo(_c("\nNo recent series yet. Search or paste a URL first!", fg="yellow"))
-            _pause()
-            return
+            return ("No recent series yet. Search or paste a URL first.", "yellow")
 
-        _banner("Recent Series")
-        for idx, item in enumerate(self.config.recent_dramas, start=1):
-            meta = f"{item.episodes_count} eps" if item.episodes_count else ""
-            if item.label:
-                meta = f"{meta} | {item.label}" if meta else item.label
-            _echo(f"  [{idx}] {item.title}" + (f"  {_c(f'({meta})', dim=True)}" if meta else ""))
-        _echo("  [c] Clear recent list")
-        _echo("  [b] Back")
-        _echo()
+        flash: tuple[str, str] | None = None
+        while True:
+            _banner("Recent Series")
+            for idx, item in enumerate(self.config.recent_dramas, start=1):
+                meta = f"{item.episodes_count} eps" if item.episodes_count else ""
+                if item.label:
+                    meta = f"{meta} | {item.label}" if meta else item.label
+                _echo(
+                    f"  [{idx}] {item.title}"
+                    + (f"  {_c(f'({meta})', dim=True)}" if meta else "")
+                )
+            _divider()
+            _show_flash(flash)
+            flash = None
+            _echo("  [Enter/#] Open series   [c] Clear list   [b] Back")
+            _echo()
 
-        raw = _prompt(
-            f"Pick # [1-{len(self.config.recent_dramas)}, Enter=1]: ",
-            default="1",
-        ).lower()
-        if raw in {"b", "back"}:
-            return
-        if raw == "c":
-            self.config.recent_dramas = []
-            self.config.save()
-            _echo(_c("Recent series list cleared.", fg="green"))
-            return
-        if not raw.isdigit() or not (1 <= int(raw) <= len(self.config.recent_dramas)):
-            _echo(_c("Invalid choice.", fg="yellow"))
-            return
+            raw = _prompt(
+                f"Pick # [1-{len(self.config.recent_dramas)}, Enter=1]: ",
+                default="1",
+            ).lower()
+            if raw in {"b", "back"}:
+                return None
+            if raw == "c":
+                self.config.recent_dramas = []
+                self.config.save()
+                return ("Recent series list cleared.", "green")
+            if raw.isdigit() and 1 <= int(raw) <= len(self.config.recent_dramas):
+                break
+            flash = (f"Enter a number from 1 to {len(self.config.recent_dramas)}.", "yellow")
 
         chosen = self.config.recent_dramas[int(raw) - 1]
-        _echo(_c(f"Refreshing episodes for '{chosen.title}' from {self.config.base_url}...", fg="cyan"))
+        _echo(_c(f"Refreshing episodes for '{chosen.title}'...", fg="cyan"))
         try:
             drama = self.service.get_drama(chosen.id)
         except requests.RequestException as exc:
-            _echo(_c(f"  Failed to load drama: {exc}", fg="red"))
-            _pause()
-            return
+            return (f"Failed to load drama: {exc}", "red")
 
         self.config.add_recent_drama(
             drama_id=drama.id,
@@ -452,19 +474,14 @@ class KissKHConsoleApp:
             label=chosen.label or drama.status,
         )
         self._download_drama_flow(drama)
+        return None
 
-    def _download_drama_flow(
+    def _render_drama_header(
         self,
         drama: DramaDetails,
-        default_ep: float | None = None,
-    ) -> None:
-        if not drama.episodes:
-            _echo(_c("\nNo episodes found for this series on kisskh.do.", fg="yellow"))
-            _pause()
-            return
-
-        run_cfg = replace(self.config, sub_langs=list(self.config.sub_langs))
-
+        run_cfg: AppConfig,
+        local_eps: set[float],
+    ) -> tuple[str, str]:
         non_recap = drama.non_recap_episodes
         recaps = drama.recap_episodes
         pool = non_recap if (run_cfg.skip_recap and non_recap) else drama.episodes
@@ -482,12 +499,6 @@ class KissKHConsoleApp:
             ep_line += f"  [+{len(recaps)} special/recap: {recap_tags}{suffix}]"
         _echo(f"  Episodes  : {ep_line}")
 
-        local_eps = get_local_downloaded_episodes(
-            output_dir=run_cfg.resolved_output_dir(),
-            drama_title=drama.title,
-            episodes=drama.episodes,
-            subs_only=run_cfg.subs_only,
-        )
         if local_eps:
             sorted_local = sorted(local_eps)
             preview = ", ".join(format_episode_tag(n) for n in sorted_local[:8])
@@ -495,19 +506,40 @@ class KissKHConsoleApp:
                 preview += f" ... ({len(sorted_local)} total)"
             _echo(f"  On Disk   : {_c(preview, fg='green')}")
 
-        _divider()
-        _echo("  Episode range examples:")
-        _echo("    1-5      episodes 1 through 5     |  3       single episode 3")
-        _echo(f"    5-       episode 5 through {last_num:<5}  |  last 3  latest 3 episodes")
-        _echo("    1-3, 7   custom mix               |  all     all episodes")
-        if default_ep is not None:
-            default_label = f"Enter = Ep {format_episode_num(default_ep)}"
-        else:
-            default_label = f"Enter = all ({first_num}-{last_num})"
-        _echo()
+        return first_num, last_num
+
+    def _download_drama_flow(
+        self,
+        drama: DramaDetails,
+        default_ep: float | None = None,
+    ) -> None:
+        if not drama.episodes:
+            _echo(_c("\nNo episodes found for this series on kisskh.do.", fg="yellow"))
+            _pause()
+            return
+
+        run_cfg = replace(self.config, sub_langs=list(self.config.sub_langs))
+        local_eps = get_local_downloaded_episodes(
+            output_dir=run_cfg.resolved_output_dir(),
+            drama_title=drama.title,
+            episodes=drama.episodes,
+            subs_only=run_cfg.subs_only,
+        )
 
         selected_episodes: list[Episode] = []
+        flash: tuple[str, str] | None = None
         while True:
+            first_num, last_num = self._render_drama_header(drama, run_cfg, local_eps)
+            _divider()
+            _show_flash(flash)
+            flash = None
+            _echo("  Examples:  1-5 (range) | 3 (single) | 5- (to end) | last 3 | 1-3, 7 | all")
+            if default_ep is not None:
+                default_label = f"Enter = Ep {format_episode_num(default_ep)}"
+            else:
+                default_label = f"Enter = all ({first_num}-{last_num})"
+            _echo()
+
             expr = _prompt(f"Episode range [{default_label}] (or 'b' back): ")
             if expr.lower() in {"b", "back"}:
                 return
@@ -519,20 +551,19 @@ class KissKHConsoleApp:
                     skip_recap=run_cfg.skip_recap,
                 )
             except ValueError as exc:
-                _echo(_c(f"  {exc}", fg="yellow"))
+                flash = (str(exc), "yellow")
                 continue
 
             if not selected_episodes:
-                _echo(
-                    _c(
-                        f"  No episodes matched '{expr}'. Available: {first_num} to {last_num}.",
-                        fg="yellow",
-                    )
+                flash = (
+                    f"No episodes matched '{expr}'. Available: {first_num} to {last_num}.",
+                    "yellow",
                 )
                 continue
             break
 
-        # Confirm & quick one-off override bar
+        # Clean confirm & quick override screen (redraws cleanly on each change)
+        flash = None
         while True:
             drama_dir = run_cfg.resolved_output_dir() / sanitize_name(drama.title)
             ep_tags = [format_episode_tag(ep.number) for ep in selected_episodes]
@@ -548,23 +579,27 @@ class KissKHConsoleApp:
             )
             to_fetch = len(selected_episodes) - on_disk_selected
 
-            _echo()
-            _divider()
-            _echo(f"  Ready     : {_c(drama.title, bold=True)} -> {ep_preview}")
+            _banner(f"Confirm Download: {drama.title}")
+            _echo(f"  Episodes  : {_c(ep_preview, bold=True)}")
             if run_cfg.skip_existing and on_disk_selected > 0:
                 _echo(
                     f"  Queue     : {to_fetch} to download, {on_disk_selected} already on disk (will skip)"
                 )
-            _echo(f"  Quality   : {run_cfg.quality}   | Mode: {'Subtitles Only' if run_cfg.subs_only else 'Video + Subtitles'}")
+            _echo(
+                f"  Quality   : {run_cfg.quality}"
+                f"   | Mode: {'Subtitles Only' if run_cfg.subs_only else 'Video + Subtitles'}"
+            )
             _echo(
                 f"  Subtitles : {run_cfg.formatted_sub_langs()} ({run_cfg.formatted_subtitle_mode()})"
                 f"   | Skip Existing: {'On' if run_cfg.skip_existing else 'Off'}"
             )
             _echo(f"  Save To   : {drama_dir}")
             _divider()
+            _show_flash(flash)
+            flash = None
             _echo(
-                "  [Enter] Start Download   [q] Quality   [s] Subtitles   "
-                "[b] Sub Mode\n  [m] Video/Subs-Only      [o] Output    [x] Skip Existing  [c] Cancel"
+                "  [Enter] Start Download   [q] Quality   [s] Subtitles   [b] Sub Mode\n"
+                "  [m] Video/Subs-Only      [o] Output    [x] Skip Existing  [c] Cancel"
             )
             action = _prompt("Action [Start]: ", default="").lower()
 
@@ -597,7 +632,7 @@ class KissKHConsoleApp:
             elif action == "x":
                 run_cfg.skip_existing = not run_cfg.skip_existing
             else:
-                _echo(_c("  Unknown option.", fg="yellow"))
+                flash = ("Unknown option.", "yellow")
 
         # Ensure authentication & ffmpeg subtitle capabilities are ready
         if not self._ensure_auth_ready():
@@ -605,8 +640,7 @@ class KissKHConsoleApp:
         if not self._ensure_ffmpeg_for_subtitle_mode(run_cfg):
             return
 
-        _echo()
-        _echo(_c("Starting download...", fg="cyan", bold=True))
+        _banner(f"Downloading: {drama.title}")
         self._set_download_logging(True)
         try:
             summary = self.service.download_episodes(
@@ -618,7 +652,10 @@ class KissKHConsoleApp:
         finally:
             self._set_download_logging(False)
 
-        _banner("Download Summary")
+        _echo()
+        _divider("=")
+        _echo(_c("  Download Summary", fg="cyan", bold=True))
+        _divider("=")
         _echo(f"  Total selected : {summary.total}")
         _echo(f"  Downloaded     : {_c(str(summary.downloaded), fg='green', bold=True)}")
         if summary.skipped:
@@ -643,8 +680,7 @@ class KissKHConsoleApp:
         if run_cfg.subtitle_mode == "embed":
             if caps.can_embed:
                 return True
-            _echo()
-            _echo(_c("ffmpeg Not Found", fg="yellow", bold=True))
+            _banner("ffmpeg Not Found")
             _echo("  Embedding subtitles into the video requires ffmpeg.")
             _echo("  [1] Continue with separate .srt files")
             _echo("  [2] Cancel")
@@ -656,13 +692,13 @@ class KissKHConsoleApp:
         if run_cfg.subtitle_mode == "burn":
             if caps.can_burn:
                 return True
-            _echo()
-            _echo(_c("Baked-In Subtitles Require ffmpeg-full (libass)", fg="yellow", bold=True))
+            _banner("Baked-In Subtitles Require ffmpeg-full (libass)")
             _echo(
-                f"  Detected ffmpeg ({caps.ffmpeg_path or 'none'}) does not include the 'subtitles' (libass) filter."
+                f"  Detected ffmpeg ({caps.ffmpeg_path or 'none'}) lacks the 'subtitles' (libass) filter."
             )
+            _echo()
             _echo("  [1] Install ffmpeg-full via Homebrew now (enables baked-in subtitles)")
-            _echo("  [2] Switch to 'embed' mode (puts subtitle track inside .mp4 — instant & works now)")
+            _echo("  [2] Switch to 'embed' mode (puts subtitle track inside .mp4 — instant)")
             _echo("  [3] Keep separate .srt files")
             _echo("  [4] Cancel")
             choice = _prompt("Select option [2]: ", default="2").lower()
@@ -670,7 +706,6 @@ class KissKHConsoleApp:
                 return _install_ffmpeg_full_flow()
             if choice == "2":
                 if not caps.can_embed:
-                    _echo(_c("  ffmpeg is not installed; keeping separate .srt files.", fg="yellow"))
                     run_cfg.subtitle_mode = "separate"
                 else:
                     run_cfg.subtitle_mode = "embed"
@@ -687,8 +722,7 @@ class KissKHConsoleApp:
         if auth.is_ready:
             return True
 
-        _echo()
-        _echo(_c("Authentication Setup Required (kkey)", fg="yellow", bold=True))
+        _banner("Authentication Setup Required (kkey)")
         _echo("  KissKH requires a 'kkey' token to fetch streams & subtitles.")
         if auth.playwright_installed and not auth.chromium_installed:
             _echo("  Playwright is installed, but its Chromium browser is missing.")
@@ -709,6 +743,7 @@ class KissKHConsoleApp:
         return False
 
     def _settings_menu(self) -> None:
+        flash: tuple[str, str] | None = None
         while True:
             _banner("Settings & Defaults")
             _echo(f"  [1] Site Source URL       : {self.config.base_url}")
@@ -723,7 +758,9 @@ class KissKHConsoleApp:
             _echo(f"  [a] Decrypt Subtitles     : {'On' if self.config.decrypt_subtitle else 'Off'}")
             _echo(f"  [v] Verbose Debug Logs    : {'On' if self.config.verbose else 'Off'}")
             _echo("  [0] Back to Main Menu")
-            _echo()
+            _divider()
+            _show_flash(flash)
+            flash = None
 
             choice = _prompt("Edit setting [0-9, a, v]: ", default="0").lower()
             if choice in {"0", "b", "back", ""}:
@@ -739,46 +776,59 @@ class KissKHConsoleApp:
                     update_env_vars({"KISSKH_BASE_URL": self.config.base_url})
                     self.config.save()
                     self._refresh_service_source()
-                    _echo(_c(f"Site source updated to {self.config.base_url}", fg="green"))
+                    flash = (f"Site source updated to {self.config.base_url}", "green")
             elif choice == "2":
                 self.config.quality = _pick_quality(self.config.quality)
                 self.config.save()
+                flash = (f"Default quality: {self.config.quality}", "green")
             elif choice == "3":
                 self.config.sub_langs = _pick_sub_langs(self.config.sub_langs)
                 self.config.save()
+                flash = (f"Subtitle languages: {self.config.formatted_sub_langs()}", "green")
             elif choice == "4":
                 self.config.subtitle_mode = _pick_subtitle_mode(self.config.subtitle_mode)
                 self.config.save()
+                flash = (f"Subtitle placement: {self.config.formatted_subtitle_mode()}", "green")
             elif choice == "5":
                 self.config.keep_separate_srt = not self.config.keep_separate_srt
                 self.config.save()
+                flash = (f"Keep .srt after merge: {'On' if self.config.keep_separate_srt else 'Off'}", "green")
             elif choice == "6":
                 self.config.subs_only = not self.config.subs_only
                 self.config.save()
+                flash = (
+                    f"Download mode: {'Subtitles Only' if self.config.subs_only else 'Video + Subtitles'}",
+                    "green",
+                )
             elif choice == "7":
                 self.config.output_dir = _pick_output_dir(self.config.output_dir)
                 self.config.save()
+                flash = (f"Output directory: {self.config.resolved_output_dir()}", "green")
             elif choice == "8":
                 self.config.skip_existing = not self.config.skip_existing
                 self.config.save()
+                flash = (f"Skip existing files: {'On' if self.config.skip_existing else 'Off'}", "green")
             elif choice == "9":
                 self.config.skip_recap = not self.config.skip_recap
                 self.config.save()
+                flash = (f"Skip recap episodes: {'On' if self.config.skip_recap else 'Off'}", "green")
             elif choice == "a":
                 if not self.config.decrypt_subtitle:
-                    _configure_decrypt_keys(self.config)
+                    if _configure_decrypt_keys(self.config):
+                        flash = ("Subtitle decryption enabled.", "green")
                 else:
                     self.config.decrypt_subtitle = False
                     self.config.save()
+                    flash = ("Subtitle decryption disabled.", "green")
             elif choice == "v":
                 self.config.verbose = not self.config.verbose
                 self.config.save()
+                flash = (f"Verbose debug logs: {'On' if self.config.verbose else 'Off'}", "green")
             else:
-                _echo(_c("Invalid choice.", fg="yellow"))
+                flash = ("Invalid choice.", "yellow")
 
     def _auth_menu(self) -> None:
-        import os
-
+        flash: tuple[str, str] | None = None
         while True:
             auth = check_auth_status()
             _banner("Authentication / kkey & Playwright Setup")
@@ -791,8 +841,13 @@ class KissKHConsoleApp:
             )
             _echo(f"  KISSKH_STREAM_KEY  : {_mask_secret(os.getenv('KISSKH_STREAM_KEY'))}")
             _echo(f"  KISSKH_SUB_KEY     : {_mask_secret(os.getenv('KISSKH_SUB_KEY'))}")
-            _echo(f"  Subtitle Decrypt   : Key={'Set' if auth.decrypt_key_set else 'Not set'}, IV={'Set' if auth.decrypt_iv_set else 'Not set'}")
+            _echo(
+                f"  Subtitle Decrypt   : Key={'Set' if auth.decrypt_key_set else 'Not set'}, "
+                f"IV={'Set' if auth.decrypt_iv_set else 'Not set'}"
+            )
             _divider()
+            _show_flash(flash)
+            flash = None
             _echo("  [1] Install / Verify Playwright + Chromium (auto kkey)")
             _echo("  [2] Set Manual KISSKH_STREAM_KEY & KISSKH_SUB_KEY (.env)")
             _echo("  [3] Clear Saved Manual kkeys (use Playwright auto mode)")
@@ -805,32 +860,31 @@ class KissKHConsoleApp:
             if choice in {"0", "b", "back", ""}:
                 return
             elif choice == "1":
-                _install_playwright_flow()
+                if _install_playwright_flow():
+                    flash = ("Playwright + Chromium ready.", "green")
+                else:
+                    flash = ("Playwright setup failed.", "red")
                 _pause()
             elif choice == "2":
-                _configure_manual_kkeys()
-                _pause()
+                if _configure_manual_kkeys():
+                    flash = ("Saved kkeys to .env and activated.", "green")
+                else:
+                    flash = ("Cancelled (keys unchanged).", "yellow")
             elif choice == "3":
                 update_env_vars({"KISSKH_STREAM_KEY": None, "KISSKH_SUB_KEY": None})
-                _echo(_c("Cleared KISSKH_STREAM_KEY and KISSKH_SUB_KEY.", fg="green"))
-                _pause()
+                flash = ("Cleared KISSKH_STREAM_KEY and KISSKH_SUB_KEY.", "green")
             elif choice == "4":
-                _configure_decrypt_keys(self.config)
-                _pause()
+                if _configure_decrypt_keys(self.config):
+                    flash = ("Subtitle decryption keys updated.", "green")
             elif choice == "5":
                 _echo(_c(f"\nTesting connection to {self.config.base_url}...", fg="cyan"))
                 try:
                     results = self.service.search("Proposal")
-                    _echo(
-                        _c(
-                            f"Success! {self.config.base_url} responded ({len(results)} search results returned).",
-                            fg="green",
-                            bold=True,
-                        )
+                    flash = (
+                        f"Success! {self.config.base_url} responded ({len(results)} search results).",
+                        "green",
                     )
                 except Exception as exc:
-                    _echo(_c(f"Connection test failed: {exc}", fg="red"))
-                _pause()
+                    flash = (f"Connection test failed: {exc}", "red")
             else:
-                _echo(_c("Invalid choice.", fg="yellow"))
-
+                flash = ("Invalid choice.", "yellow")

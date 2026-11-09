@@ -10,6 +10,7 @@ from dotenv import load_dotenv, set_key, unset_key
 from kisskh_downloader.enums.quality import Quality
 
 DEFAULT_BASE_URL = "https://kisskh.do"
+DEFAULT_SUBTITLE_MODE = "embed"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -52,7 +53,7 @@ class AppConfig:
     base_url: str = DEFAULT_BASE_URL
     quality: str = "1080p"
     sub_langs: list[str] = field(default_factory=lambda: ["en"])
-    subtitle_mode: str = "separate"  # "separate", "embed", or "burn"
+    subtitle_mode: str = DEFAULT_SUBTITLE_MODE  # "separate", "embed", or "burn"
     keep_separate_srt: bool = False
     subs_only: bool = False
     output_dir: str = field(default_factory=lambda: str(Path.home() / "Downloads"))
@@ -88,8 +89,8 @@ class AppConfig:
                     elif isinstance(sub_langs, str):
                         cfg.sub_langs = [x.strip() for x in sub_langs.split(",") if x.strip()]
 
-                    sub_mode = str(raw.get("subtitle_mode") or "separate").strip().lower()
-                    cfg.subtitle_mode = sub_mode if sub_mode in VALID_SUBTITLE_MODES else "separate"
+                    sub_mode = str(raw.get("subtitle_mode") or DEFAULT_SUBTITLE_MODE).strip().lower()
+                    cfg.subtitle_mode = sub_mode if sub_mode in VALID_SUBTITLE_MODES else DEFAULT_SUBTITLE_MODE
                     cfg.keep_separate_srt = bool(raw.get("keep_separate_srt", False))
 
                     cfg.subs_only = bool(raw.get("subs_only", False))
