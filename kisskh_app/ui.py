@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -32,7 +31,11 @@ from kisskh_app.config import (
     AppConfig,
     update_env_vars,
 )
-from kisskh_app.subtitles_mux import detect_ffmpeg_capabilities
+from kisskh_app.subtitles_mux import (
+    detect_ffmpeg_capabilities,
+    find_brew_binary,
+    find_windows_package_manager,
+)
 
 
 def _c(text: str, fg: str | None = None, bold: bool = False, dim: bool = False) -> str:
@@ -44,10 +47,17 @@ def _echo(text: str = "") -> None:
 
 
 def _clear_screen() -> None:
-    click.clear()
+    if not sys.stdout.isatty():
+        return
+    if sys.platform == "win32":
+        os.system("cls")
+    else:
+        click.clear()
 
 
 def _divider(char: str = "─", width: int = 64) -> None:
+    if char == "─" and "utf" not in (sys.stdout.encoding or "").lower():
+        char = "-"
     _echo(_c(char * width, dim=True))
 
 
@@ -199,10 +209,15 @@ def _pick_output_dir(current: str) -> str:
 def _pick_subtitle_mode(current: str) -> str:
     caps = detect_ffmpeg_capabilities()
     embed_note = _c("ready", fg="green") if caps.can_embed else _c("ffmpeg missing", fg="red")
+    missing_burn_msg = (
+        "needs ffmpeg-full / libass"
+        if sys.platform == "darwin"
+        else "needs ffmpeg with libass (e.g. Gyan.FFmpeg)"
+    )
     burn_note = (
         _c("ready", fg="green")
         if caps.can_burn
-        else _c("needs ffmpeg-full / libass", fg="yellow")
+        else _c(missing_burn_msg, fg="yellow")
     )
 
     options = [
@@ -226,22 +241,113 @@ def _pick_subtitle_mode(current: str) -> str:
     return current
 
 
-def _install_ffmpeg_full_flow() -> bool:
-    brew = shutil.which("brew")
-    if not brew:
-        _echo(_c("Homebrew ('brew') not found in PATH. Install an ffmpeg build with libass manually.", fg="red"))
-        return False
-    _echo(_c("\nRunning 'brew install ffmpeg-full' (adds libass for baked-in subtitles)...", fg="cyan"))
-    res = subprocess.run([brew, "install", "ffmpeg-full"], check=False)
+def _install_homebrew_flow() -> str | None:
+    brew = find_brew_binary()
+    if brew:
+        return brew
+    if sys.platform != "darwin":
+        _echo(_c("Automatic Homebrew setup is only supported on macOS. Install ffmpeg using your package manager.", fg="red"))
+        return None
+    _echo(_c("\nInstalling Homebrew (macOS package manager)...", fg="cyan"))
+    res = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)",
+        ],
+        check=False,
+    )
     if res.returncode != 0:
-        _echo(_c("Failed to install ffmpeg-full via Homebrew.", fg="red"))
+        _echo(_c("Homebrew installation did not complete.", fg="red"))
+        return None
+    brew = find_brew_binary()
+    if not brew:
+        _echo(_c("Homebrew installed, but 'brew' was not found in standard paths.", fg="yellow"))
+        return None
+    _echo(_c(f"Homebrew ready: {brew}", fg="green", bold=True))
+    return brew
+
+
+def _install_ffmpeg_windows_flow() -> bool:
+    pkg_mgr = find_windows_package_manager()
+    if not pkg_mgr:
+        _echo(_c("No Windows package manager (winget, scoop, or choco) found.", fg="red"))
+        _echo("  Install FFmpeg manually (e.g. 'winget install Gyan.FFmpeg' or download from gyan.dev).")
         return False
+
+    name, path = pkg_mgr
+    if name == "winget":
+        cmd = [
+            path,
+            "install",
+            "-e",
+            "--id",
+            "Gyan.FFmpeg",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ]
+    elif name == "scoop":
+        cmd = [path, "install", "ffmpeg"]
+    else:
+        cmd = [path, "install", "ffmpeg", "-y"]
+
+    _echo(_c(f"\nInstalling FFmpeg via {name}...", fg="cyan"))
+    res = subprocess.run(cmd, check=False)
+    if res.returncode != 0:
+        _echo(_c(f"Failed to install FFmpeg via {name}.", fg="red"))
+        return False
+
     caps = detect_ffmpeg_capabilities()
-    if not caps.can_burn:
+    if not caps.can_embed:
+        _echo(
+            _c(
+                "FFmpeg installed, but a new terminal may be required to refresh PATH.",
+                fg="yellow",
+            )
+        )
+        return False
+    _echo(_c("FFmpeg is ready!", fg="green", bold=True))
+    return True
+
+
+def _install_ffmpeg_flow(full: bool = False) -> bool:
+    if sys.platform == "win32":
+        return _install_ffmpeg_windows_flow()
+
+    if sys.platform != "darwin":
+        _echo(_c("Please install ffmpeg using your Linux package manager (e.g. 'sudo apt install ffmpeg').", fg="yellow"))
+        return False
+
+    brew = find_brew_binary()
+    if not brew:
+        ans = _prompt("Homebrew is not installed. Install Homebrew first? [Y/n]: ", default="y").lower()
+        if ans not in {"y", "yes", ""}:
+            return False
+        brew = _install_homebrew_flow()
+        if not brew:
+            _echo(_c("Cannot install ffmpeg automatically without Homebrew. Run ./setup.sh or install ffmpeg manually.", fg="red"))
+            return False
+
+    pkg = "ffmpeg-full" if full else "ffmpeg"
+    _echo(_c(f"\nRunning '{brew} install {pkg}'...", fg="cyan"))
+    res = subprocess.run([brew, "install", pkg], check=False)
+    if res.returncode != 0:
+        _echo(_c(f"Failed to install {pkg} via Homebrew.", fg="red"))
+        return False
+
+    caps = detect_ffmpeg_capabilities()
+    if full and not caps.can_burn:
         _echo(_c("ffmpeg-full installed, but 'subtitles' filter was not detected.", fg="yellow"))
         return False
-    _echo(_c("ffmpeg-full is ready for baked-in subtitles!", fg="green", bold=True))
+    if not caps.can_embed:
+        _echo(_c("ffmpeg installation finished, but binary was not found.", fg="yellow"))
+        return False
+    _echo(_c(f"{pkg} is ready!", fg="green", bold=True))
     return True
+
+
+def _install_ffmpeg_full_flow() -> bool:
+    return _install_ffmpeg_flow(full=True)
 
 
 class KissKHConsoleApp:
@@ -292,7 +398,9 @@ class KissKHConsoleApp:
 
     def _show_main_menu(self, flash: tuple[str, str] | None = None) -> str:
         auth = check_auth_status()
+        ffmpeg_caps = detect_ffmpeg_capabilities()
         auth_color = "green" if auth.is_ready else "yellow"
+        ffmpeg_color = "green" if ffmpeg_caps.can_embed else "yellow"
 
         _banner("KissKH Episode Range Downloader")
         _echo(f"  Source  : {_c(self.config.base_url, fg='green', bold=True)}")
@@ -307,6 +415,7 @@ class KissKHConsoleApp:
         )
         _echo(f"  Output  : {self.config.resolved_output_dir()}")
         _echo(f"  Auth    : {_c(auth.summary_text(), fg=auth_color)}")
+        _echo(f"  ffmpeg  : {_c(ffmpeg_caps.summary_text(), fg=ffmpeg_color)}")
         _divider()
         _show_flash(flash)
 
@@ -316,7 +425,7 @@ class KissKHConsoleApp:
         _echo(f"  {_c('[1]', fg='cyan', bold=True)} Search or Paste URL & Download  {_c('(Enter)', dim=True)}")
         _echo(f"  {_c('[2]', fg='cyan', bold=True)} Recent Series{recent_hint}")
         _echo(f"  {_c('[3]', fg='cyan', bold=True)} Settings & Defaults")
-        _echo(f"  {_c('[4]', fg='cyan', bold=True)} Auth / kkey & Playwright Setup")
+        _echo(f"  {_c('[4]', fg='cyan', bold=True)} Setup & Tools (Auth, Playwright, ffmpeg)")
         _echo(f"  {_c('[5]', fg='cyan', bold=True)} Exit")
         _echo()
         return _prompt("Select option [1]: ", default="1").lower()
@@ -682,9 +791,34 @@ class KissKHConsoleApp:
                 return True
             _banner("ffmpeg Not Found")
             _echo("  Embedding subtitles into the video requires ffmpeg.")
-            _echo("  [1] Continue with separate .srt files")
-            _echo("  [2] Cancel")
-            if _prompt("Select option [1]: ", default="1") == "1":
+            if sys.platform == "win32":
+                win_mgr = find_windows_package_manager()
+                install_label = (
+                    f"Install FFmpeg via {win_mgr[0]} now"
+                    if win_mgr
+                    else "Install FFmpeg (shows instructions)"
+                )
+            elif sys.platform == "darwin":
+                install_label = (
+                    "Install ffmpeg via Homebrew now"
+                    if find_brew_binary()
+                    else "Install Homebrew + ffmpeg now"
+                )
+            else:
+                install_label = "Show ffmpeg install instructions"
+            _echo(f"  [1] {install_label} (recommended)")
+            _echo("  [2] Continue with separate .srt files")
+            _echo("  [3] Cancel")
+            choice = _prompt("Select option [1]: ", default="1").lower()
+            if choice == "1":
+                if _install_ffmpeg_flow(full=False):
+                    return True
+                fallback = _prompt("Continue with separate .srt files instead? [Y/n]: ", default="y").lower()
+                if fallback in {"y", "yes", ""}:
+                    run_cfg.subtitle_mode = "separate"
+                    return True
+                return False
+            if choice == "2":
                 run_cfg.subtitle_mode = "separate"
                 return True
             return False
@@ -692,12 +826,17 @@ class KissKHConsoleApp:
         if run_cfg.subtitle_mode == "burn":
             if caps.can_burn:
                 return True
-            _banner("Baked-In Subtitles Require ffmpeg-full (libass)")
+            _banner("Baked-In Subtitles Require ffmpeg with libass")
             _echo(
                 f"  Detected ffmpeg ({caps.ffmpeg_path or 'none'}) lacks the 'subtitles' (libass) filter."
             )
             _echo()
-            _echo("  [1] Install ffmpeg-full via Homebrew now (enables baked-in subtitles)")
+            if sys.platform == "win32":
+                _echo("  [1] Install full FFmpeg (Gyan.FFmpeg via winget) now")
+            elif sys.platform == "darwin":
+                _echo("  [1] Install ffmpeg-full via Homebrew now (enables baked-in subtitles)")
+            else:
+                _echo("  [1] Show libass ffmpeg setup instructions")
             _echo("  [2] Switch to 'embed' mode (puts subtitle track inside .mp4 — instant)")
             _echo("  [3] Keep separate .srt files")
             _echo("  [4] Cancel")
@@ -831,8 +970,11 @@ class KissKHConsoleApp:
         flash: tuple[str, str] | None = None
         while True:
             auth = check_auth_status()
-            _banner("Authentication / kkey & Playwright Setup")
-            _echo(f"  Overall Status     : {auth.summary_text()}")
+            caps = detect_ffmpeg_capabilities()
+            brew = find_brew_binary() if sys.platform == "darwin" else None
+            win_mgr = find_windows_package_manager() if sys.platform == "win32" else None
+            _banner("Setup & Tools (Auth, Playwright, ffmpeg)")
+            _echo(f"  Auth Status        : {auth.summary_text()}")
             _echo(
                 f"  Playwright Package : {'Installed' if auth.playwright_installed else 'Not installed'}"
             )
@@ -845,6 +987,12 @@ class KissKHConsoleApp:
                 f"  Subtitle Decrypt   : Key={'Set' if auth.decrypt_key_set else 'Not set'}, "
                 f"IV={'Set' if auth.decrypt_iv_set else 'Not set'}"
             )
+            if sys.platform == "darwin":
+                _echo(f"  Homebrew           : {brew or 'Not installed'}")
+            elif sys.platform == "win32":
+                mgr_text = f"{win_mgr[0]} ({win_mgr[1]})" if win_mgr else "Not found (winget/scoop/choco)"
+                _echo(f"  Package Manager    : {mgr_text}")
+            _echo(f"  ffmpeg             : {caps.summary_text()}")
             _divider()
             _show_flash(flash)
             flash = None
@@ -853,10 +1001,16 @@ class KissKHConsoleApp:
             _echo("  [3] Clear Saved Manual kkeys (use Playwright auto mode)")
             _echo("  [4] Set / Update Subtitle Decryption Keys (.env)")
             _echo(f"  [5] Test Connection to {self.config.base_url}")
+            if sys.platform == "darwin":
+                _echo("  [6] Install ffmpeg / ffmpeg-full via Homebrew")
+            elif sys.platform == "win32":
+                _echo("  [6] Install FFmpeg via winget / scoop / choco")
+            else:
+                _echo("  [6] Install ffmpeg instructions")
             _echo("  [0] Back to Main Menu")
             _echo()
 
-            choice = _prompt("Select option [0-5]: ", default="0").lower()
+            choice = _prompt("Select option [0-6]: ", default="0").lower()
             if choice in {"0", "b", "back", ""}:
                 return
             elif choice == "1":
@@ -886,5 +1040,24 @@ class KissKHConsoleApp:
                     )
                 except Exception as exc:
                     flash = (f"Connection test failed: {exc}", "red")
+            elif choice == "6":
+                if sys.platform == "darwin":
+                    _echo()
+                    _echo("  [1] Standard ffmpeg (fast soft-embedded MP4/MKV subtitles)")
+                    _echo("  [2] ffmpeg-full (also supports baked-in permanent hardsubs)")
+                    _echo("  [0] Cancel")
+                    sub_choice = _prompt("Choose ffmpeg package [1]: ", default="1").lower()
+                    if sub_choice == "1":
+                        ok = _install_ffmpeg_flow(full=False)
+                        flash = ("ffmpeg is ready." if ok else "ffmpeg setup failed.", "green" if ok else "red")
+                        _pause()
+                    elif sub_choice == "2":
+                        ok = _install_ffmpeg_flow(full=True)
+                        flash = ("ffmpeg-full is ready." if ok else "ffmpeg-full setup failed.", "green" if ok else "red")
+                        _pause()
+                else:
+                    ok = _install_ffmpeg_flow(full=False)
+                    flash = ("ffmpeg is ready." if ok else "ffmpeg setup incomplete.", "green" if ok else "yellow")
+                    _pause()
             else:
                 flash = ("Invalid choice.", "yellow")

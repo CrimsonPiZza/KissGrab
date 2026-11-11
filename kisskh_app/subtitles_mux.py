@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,6 +88,15 @@ class FfmpegCapabilities:
             self.has_libx264 or self.has_videotoolbox
         )
 
+    def summary_text(self) -> str:
+        if self.can_burn:
+            return "Ready (embed + bake)"
+        if self.can_embed:
+            if sys.platform == "darwin":
+                return "Ready (embed; ffmpeg-full needed for bake)"
+            return "Ready (embed; libass build needed for bake)"
+        return "Not installed (required for video/sub muxing)"
+
 
 def iso639_2_code(lang: str) -> str:
     cleaned = (lang or "").strip().lower()
@@ -97,14 +107,72 @@ def iso639_2_code(lang: str) -> str:
     return "und"
 
 
-def _candidate_ffmpeg_binaries() -> list[str]:
-    candidates: list[str] = []
+def find_brew_binary() -> str | None:
+    """Locate Homebrew binary in PATH or standard macOS install prefixes."""
     for raw in (
-        os.getenv("FFMPEG_BIN"),
-        "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
-        "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
-        shutil.which("ffmpeg"),
+        shutil.which("brew"),
+        "/opt/homebrew/bin/brew",
+        "/usr/local/bin/brew",
     ):
+        if raw and os.path.isfile(raw) and os.access(raw, os.X_OK):
+            return raw
+    return None
+
+
+def find_windows_package_manager() -> tuple[str, str] | None:
+    """Locate a Windows package manager (winget, scoop, or choco)."""
+    for name in ("winget", "scoop", "choco"):
+        path = shutil.which(name)
+        if path:
+            return name, path
+    if sys.platform == "win32":
+        local_app = os.getenv("LOCALAPPDATA")
+        if local_app:
+            winget_exe = Path(local_app) / "Microsoft" / "WindowsApps" / "winget.exe"
+            if winget_exe.is_file():
+                return "winget", str(winget_exe)
+    return None
+
+
+def _windows_ffmpeg_candidates() -> list[str]:
+    candidates: list[str] = []
+    local_app = os.getenv("LOCALAPPDATA")
+    user_profile = os.getenv("USERPROFILE")
+    program_data = os.getenv("ProgramData")
+
+    if user_profile:
+        candidates.append(str(Path(user_profile) / "scoop" / "shims" / "ffmpeg.exe"))
+    if program_data:
+        candidates.append(str(Path(program_data) / "chocolatey" / "bin" / "ffmpeg.exe"))
+    if local_app:
+        winget_links = Path(local_app) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+        candidates.append(str(winget_links))
+        winget_pkgs = Path(local_app) / "Microsoft" / "WinGet" / "Packages"
+        if winget_pkgs.is_dir():
+            for pkg_dir in winget_pkgs.glob("*FFmpeg*"):
+                for exe in pkg_dir.rglob("ffmpeg.exe"):
+                    candidates.append(str(exe))
+                    break
+    return candidates
+
+
+def _candidate_ffmpeg_binaries() -> list[str]:
+    raw_list: list[str | None] = [
+        os.getenv("FFMPEG_BIN"),
+        shutil.which("ffmpeg"),
+    ]
+    if sys.platform == "win32":
+        raw_list.extend(_windows_ffmpeg_candidates())
+    else:
+        raw_list.extend([
+            "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+            "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+        ])
+
+    candidates: list[str] = []
+    for raw in raw_list:
         if raw and raw not in candidates and os.path.isfile(raw) and os.access(raw, os.X_OK):
             candidates.append(raw)
     return candidates
@@ -223,7 +291,8 @@ def find_downloaded_subtitles(target_dir: Path, stem_prefix: str) -> list[tuple[
 
 def escape_ffmpeg_filter_path(path: Path) -> str:
     """Escape a filesystem path for FFmpeg's filtergraph option syntax."""
-    s = str(path.resolve())
+    # Forward slashes avoid Windows backslash escaping quirks inside -vf subtitles='...'
+    s = path.resolve().as_posix()
     s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
     s = s.replace("'", "\\'")

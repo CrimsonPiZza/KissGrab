@@ -103,11 +103,21 @@ class DownloadSummary:
     cancelled: bool = False
 
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+
 def sanitize_name(name: str) -> str:
-    """Sanitize a drama title for safe folder and file names."""
+    """Sanitize a drama title for safe cross-platform folder and file names."""
     sanitized = re.sub(r'[\\\0-\037/;:|*?"<>]', "_", name)
     sanitized = sanitized.replace("..", "_")
-    return sanitized.strip(". ") or "_"
+    cleaned = sanitized.strip(". ") or "_"
+    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"{cleaned}_"
+    return cleaned
 
 
 def slugify_title(title: str) -> str:

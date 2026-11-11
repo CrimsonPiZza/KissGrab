@@ -24,10 +24,14 @@ from kisskh_app.client import (
 )
 from kisskh_app.config import DEFAULT_BASE_URL, AppConfig, update_env_vars
 from kisskh_app.subtitles_mux import (
+    FfmpegCapabilities,
+    _windows_ffmpeg_candidates,
     burn_subtitle_into_video,
     detect_ffmpeg_capabilities,
     embed_subtitles_in_video,
     escape_ffmpeg_filter_path,
+    find_brew_binary,
+    find_windows_package_manager,
     iso639_2_code,
 )
 from kisskh_app.ui import KissKHConsoleApp
@@ -126,6 +130,7 @@ class TestInputAndRangeParsing(unittest.TestCase):
         self.assertEqual(format_episode_num(1.0), "1")
         self.assertEqual(format_episode_num(16.1), "16.1")
         self.assertEqual(sanitize_name("Show: Part/1?"), "Show_ Part_1_")
+        self.assertEqual(sanitize_name("CON"), "CON_")
         self.assertEqual(slugify_title("#Alive: Part 2"), "Alive-Part-2")
 
 
@@ -371,6 +376,54 @@ class TestSubtitleMuxAndBurn(unittest.TestCase):
             self.assertIn("-vf", called_cmd)
             vf_arg = called_cmd[called_cmd.index("-vf") + 1]
             self.assertTrue(vf_arg.startswith("subtitles='"))
+
+    def test_ffmpeg_capabilities_summary_and_brew_lookup(self) -> None:
+        missing = FfmpegCapabilities()
+        self.assertFalse(missing.can_embed)
+        self.assertIn("Not installed", missing.summary_text())
+
+        embed_only = FfmpegCapabilities(ffmpeg_path="/opt/homebrew/bin/ffmpeg")
+        self.assertTrue(embed_only.can_embed)
+        self.assertFalse(embed_only.can_burn)
+        self.assertIn("embed", embed_only.summary_text())
+
+        full = FfmpegCapabilities(
+            ffmpeg_path="/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+            burn_ffmpeg_path="/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+            has_libx264=True,
+        )
+        self.assertTrue(full.can_burn)
+        self.assertIn("embed + bake", full.summary_text())
+
+        with patch("kisskh_app.subtitles_mux.shutil.which", return_value=None), patch(
+            "kisskh_app.subtitles_mux.os.path.isfile", return_value=False
+        ):
+            self.assertIsNone(find_brew_binary())
+
+    def test_windows_paths_and_pkg_manager_detection(self) -> None:
+        fake_path = MagicMock()
+        fake_resolved = MagicMock()
+        fake_resolved.as_posix.return_value = "C:/Users/Alice/Show [1]/ep's.srt"
+        fake_path.resolve.return_value = fake_resolved
+        escaped = escape_ffmpeg_filter_path(fake_path)
+        self.assertEqual(escaped, "C\\:/Users/Alice/Show \\[1\\]/ep\\'s.srt")
+
+        with patch("kisskh_app.subtitles_mux.shutil.which", side_effect=lambda x: "C:\\winget.exe" if x == "winget" else None):
+            self.assertEqual(find_windows_package_manager(), ("winget", "C:\\winget.exe"))
+
+        with patch.dict(
+            os.environ,
+            {
+                "USERPROFILE": "C:\\Users\\Alice",
+                "ProgramData": "C:\\ProgramData",
+                "LOCALAPPDATA": "C:\\Users\\Alice\\AppData\\Local",
+            },
+            clear=False,
+        ):
+            candidates = _windows_ffmpeg_candidates()
+            self.assertTrue(any("scoop" in c for c in candidates))
+            self.assertTrue(any("chocolatey" in c for c in candidates))
+            self.assertTrue(any("WinGet" in c for c in candidates))
 
 
 class TestConsoleUIExit(unittest.TestCase):

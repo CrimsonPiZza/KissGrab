@@ -4,14 +4,40 @@ A simple, frictionless console menu application powered by [`debakarr/kisskh-dl`
 
 ## Quick Start
 
+### macOS / Linux (First-Time Setup)
+
+Run the included setup script to install Homebrew (if missing on macOS), `ffmpeg`, `.venv`, `kisskh-downloader`, and Playwright + Chromium:
+
+```bash
+./setup.sh
+```
+
+*(Pass `./setup.sh --full` if you also want `ffmpeg-full` for baked-in/hardcoded subtitles.)*
+
+### Windows (First-Time Setup)
+
+Double-click `setup.bat` or run it in Command Prompt / PowerShell to check/install FFmpeg (via `winget` / `scoop` / `choco`), create `.venv`, install `kisskh-downloader`, and set up Playwright + Chromium:
+
+```cmd
+setup.bat
+```
+
+### Launch
+
+**macOS / Linux:**
 ```bash
 ./run.sh
 ```
 
-Or run with Python directly (auto-activates `.venv` if invoked from system Python):
+**Windows:**
+```cmd
+run.bat
+```
+
+Or run with Python directly on any OS (auto-activates `.venv` if invoked from system Python):
 
 ```bash
-python3 main.py
+python main.py
 ```
 
 You can also jump straight into searching or opening a URL from the command line:
@@ -34,7 +60,7 @@ You can also jump straight into searching or opening a URL from the command line
 
 ## Requirements
 
-- `kisskh-downloader>=0.2.4` (already installed in `.venv`)
-- `ffmpeg` (already installed via Homebrew for `yt-dlp` stream muxing and soft-embedding subtitles inside `.mp4`/`.mkv`; for **baked-in / hardcoded** subtitles, `ffmpeg-full` with `libass` is required and can be installed via Homebrew right from the menu)
-- For automatic `kkey` authentication: Playwright + Chromium (`[4] Auth / kkey & Playwright Setup` in the app menu can install this automatically, or run `.venv/bin/pip install playwright && .venv/bin/playwright install chromium`)
+- Python 3.10+ and `kisskh-downloader>=0.2.4`
+- `ffmpeg` (for `yt-dlp` stream muxing and soft-embedding subtitles inside `.mp4`/`.mkv`; on macOS `ffmpeg-full` adds `libass` for baked-in subtitles, while on Windows `Gyan.FFmpeg` via `winget` already includes `libass`)
+- For automatic `kkey` authentication: Playwright + Chromium (`[4] Setup & Tools` in the app menu can install this automatically)
 
