@@ -18,7 +18,7 @@ for arg in "$@"; do
       cat <<'EOF'
 Usage: ./setup.sh [OPTIONS]
 
-First-time setup helper for KissKH Episode Range Downloader.
+First-time setup helper for KissGrab (kisskh.do episode range downloader).
 Checks and installs Homebrew (macOS), ffmpeg, Python virtualenv (.venv),
 kisskh-downloader, and Playwright + Chromium.
 
@@ -67,7 +67,7 @@ find_brew() {
 }
 
 echo "================================================================"
-echo "  KissKH Downloader - First-Time Setup"
+echo "  KissGrab - First-Time Setup"
 echo "================================================================"
 echo
 
@@ -189,6 +189,6 @@ fi
 echo
 echo "================================================================"
 echo "  Setup Complete!"
-echo "  Start the app anytime with:  ./run.sh"
+echo "  Start KissGrab anytime with:  ./run.sh"
 echo "================================================================"
 

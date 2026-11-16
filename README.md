@@ -1,6 +1,6 @@
-# KissKH Episode Range Downloader (`kisskh.do`)
+# KissGrab (`kisskh.do`)
 
-A simple, frictionless console menu application powered by [`debakarr/kisskh-dl`](https://github.com/debakarr/kisskh-dl) (`kisskh-downloader`) using **`https://kisskh.do`** as the main site source.
+A simple, frictionless console menu application to grab episode ranges from **`https://kisskh.do`**, powered by [`debakarr/kisskh-dl`](https://github.com/debakarr/kisskh-dl) (`kisskh-downloader`).
 
 ## Quick Start
 

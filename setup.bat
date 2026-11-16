@@ -12,7 +12,7 @@ goto :start
 :help
 echo Usage: setup.bat [-y^|--yes] [-h^|--help]
 echo.
-echo First-time setup helper for Windows:
+echo First-time setup helper for KissGrab ^(Windows^):
 echo   1. Checks/installs FFmpeg (via winget/scoop/choco)
 echo   2. Checks Python 3.10+ and creates .venv
 echo   3. Installs kisskh-downloader and dependencies
@@ -21,7 +21,7 @@ exit /b 0
 
 :start
 echo ================================================================
-echo   KissKH Downloader - Windows First-Time Setup
+echo   KissGrab - Windows First-Time Setup
 echo ================================================================
 echo.
 
@@ -143,7 +143,7 @@ if !errorlevel!==0 (
 echo.
 echo ================================================================
 echo   Setup Complete!
-echo   Start the app anytime with:  run.bat
+echo   Start KissGrab anytime with:  run.bat
 echo ================================================================
 if "%AUTO_YES%"=="0" pause
 exit /b 0

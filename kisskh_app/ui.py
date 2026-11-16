@@ -12,6 +12,7 @@ import requests
 from kisskh_downloader.models.drama import Episode
 from kisskh_downloader.models.search import DramaInfo
 
+from kisskh_app import APP_NAME
 from kisskh_app.client import (
     AuthStatus,
     DramaDetails,
@@ -387,7 +388,7 @@ class KissKHConsoleApp:
                 elif choice == "4":
                     self._auth_menu()
                 elif choice in {"5", "q", "quit", "exit"}:
-                    _echo(_c("Goodbye!", fg="cyan"))
+                    _echo(_c(f"Goodbye from {APP_NAME}!", fg="cyan"))
                     break
                 else:
                     flash = ("Unknown option. Choose 1-5.", "yellow")
@@ -402,7 +403,7 @@ class KissKHConsoleApp:
         auth_color = "green" if auth.is_ready else "yellow"
         ffmpeg_color = "green" if ffmpeg_caps.can_embed else "yellow"
 
-        _banner("KissKH Episode Range Downloader")
+        _banner(f"{APP_NAME} — Episode Range Downloader")
         _echo(f"  Source  : {_c(self.config.base_url, fg='green', bold=True)}")
         _echo(
             f"  Format  : {_c(self.config.quality, bold=True)}"
