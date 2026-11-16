@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,52 @@ from kisskh_downloader.enums.quality import Quality
 DEFAULT_BASE_URL = "https://kisskh.do"
 DEFAULT_SUBTITLE_MODE = "embed"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config.json"
-ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def get_config_dir() -> Path:
+    """Return the configuration directory for KissGrab.
+
+    Priority:
+    1. KISSGRAB_CONFIG_DIR environment variable (if non-empty)
+    2. Local repository directory if running from a git/source checkout (main.py present)
+    3. OS standard user config directory:
+       - Windows: %APPDATA%/kissgrab
+       - macOS: ~/Library/Application Support/kissgrab
+       - Linux/Other: $XDG_CONFIG_HOME/kissgrab or ~/.config/kissgrab
+    """
+    env_dir = os.getenv("KISSGRAB_CONFIG_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+
+    repo_root = Path(__file__).resolve().parent.parent
+    is_in_site_packages = any(
+        part.lower() in ("site-packages", "dist-packages") for part in repo_root.parts
+    )
+    if (repo_root / "main.py").is_file() and not is_in_site_packages:
+        return repo_root
+
+    if sys.platform == "win32":
+        app_data = os.getenv("APPDATA")
+        base = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        xdg_config = os.getenv("XDG_CONFIG_HOME")
+        base = Path(xdg_config) if xdg_config else Path.home() / ".config"
+
+    return (base / "kissgrab").resolve()
+
+
+def get_config_path() -> Path:
+    return get_config_dir() / "config.json"
+
+
+def get_env_path() -> Path:
+    return get_config_dir() / ".env"
+
+
+CONFIG_PATH = get_config_path()
+ENV_PATH = get_env_path()
 VALID_QUALITIES: list[str] = [q.value for q in Quality]
 VALID_SUBTITLE_MODES: tuple[str, ...] = ("separate", "embed", "burn")
 MAX_RECENT_DRAMAS = 10
@@ -66,18 +111,21 @@ class AppConfig:
     @classmethod
     def load(
         cls,
-        config_path: Path = CONFIG_PATH,
-        env_path: Path = ENV_PATH,
+        config_path: Path | None = None,
+        env_path: Path | None = None,
     ) -> AppConfig:
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
+        actual_env_path = env_path if env_path is not None else get_env_path()
+        actual_config_path = config_path if config_path is not None else get_config_path()
+
+        if actual_env_path.exists():
+            load_dotenv(actual_env_path, override=False)
 
         env_base_url = os.getenv("KISSKH_BASE_URL")
         cfg = cls()
 
-        if config_path.exists():
+        if actual_config_path.exists():
             try:
-                raw = json.loads(config_path.read_text(encoding="utf-8"))
+                raw = json.loads(actual_config_path.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     cfg.base_url = _ensure_valid_base_url(raw.get("base_url") or env_base_url or DEFAULT_BASE_URL)
                     quality = str(raw.get("quality") or "1080p")
@@ -120,12 +168,13 @@ class AppConfig:
         os.environ["KISSKH_BASE_URL"] = cfg.base_url
         return cfg
 
-    def save(self, config_path: Path = CONFIG_PATH) -> None:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+    def save(self, config_path: Path | None = None) -> None:
+        target_path = config_path if config_path is not None else get_config_path()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         payload = asdict(self)
-        tmp_path = config_path.with_suffix(".json.tmp")
+        tmp_path = target_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(config_path)
+        tmp_path.replace(target_path)
 
     def add_recent_drama(
         self,
@@ -133,7 +182,7 @@ class AppConfig:
         title: str,
         episodes_count: int = 0,
         label: str = "",
-        config_path: Path = CONFIG_PATH,
+        config_path: Path | None = None,
     ) -> None:
         entry = RecentDrama(
             id=drama_id,
@@ -162,17 +211,17 @@ class AppConfig:
         return labels.get(self.subtitle_mode, "Separate .srt")
 
 
-def update_env_vars(updates: dict[str, str | None], env_path: Path = ENV_PATH) -> None:
+def update_env_vars(updates: dict[str, str | None], env_path: Path | None = None) -> None:
     """Persist environment variables to .env and update os.environ immediately."""
-    if not env_path.exists():
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        env_path.write_text("", encoding="utf-8")
+    target_path = env_path if env_path is not None else get_env_path()
+    if not target_path.exists():
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("", encoding="utf-8")
 
     for key, value in updates.items():
         if value is None or value == "":
             os.environ.pop(key, None)
-            unset_key(str(env_path), key)
+            unset_key(str(target_path), key)
         else:
             os.environ[key] = value
-            set_key(str(env_path), key, value)
-
+            set_key(str(target_path), key, value)

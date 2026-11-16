@@ -140,10 +140,50 @@ if !errorlevel!==0 (
     )
 )
 
+rem 5. System PATH Setup (run 'kissgrab' from anywhere)
+echo.
+echo ================================================================
+echo   System PATH Setup (Run 'kissgrab' from anywhere)
+echo ================================================================
+set "DO_LINK=Y"
+if "!AUTO_YES!"=="0" (
+    set /p "DO_LINK=Make 'kissgrab' runnable from any command prompt / PowerShell? [Y/n]: "
+)
+if /i "!DO_LINK!"=="" set "DO_LINK=Y"
+if /i "!DO_LINK!"=="Y" (
+    set "WIN_APPS=%USERPROFILE%\AppData\Local\Microsoft\WindowsApps"
+    if exist "!WIN_APPS!" (
+        (
+            echo @echo off
+            echo call "%SCRIPT_DIR%run.bat" %%*
+        ) > "!WIN_APPS!\kissgrab.cmd"
+        echo [ok] Installed 'kissgrab' command to !WIN_APPS!\kissgrab.cmd
+    ) else (
+        echo [!] WindowsApps directory not found. You can run KissGrab with run.bat.
+    )
+)
+
+rem 6. Optional: Pipx Setup via winget
+where pipx >nul 2>&1
+if !errorlevel! neq 0 (
+    where winget >nul 2>&1
+    if !errorlevel!==0 (
+        echo.
+        set "DO_PIPX=N"
+        if "!AUTO_YES!"=="0" (
+            set /p "DO_PIPX=Install 'pipx' via winget (for managing Python CLI packages)? [y/N]: "
+        )
+        if /i "!DO_PIPX!"=="Y" (
+            winget install pipx
+            echo [ok] pipx install requested via winget.
+        )
+    )
+)
+
 echo.
 echo ================================================================
 echo   Setup Complete!
-echo   Start KissGrab anytime with:  run.bat
+echo   Start KissGrab anytime with:     kissgrab  (or run.bat)
 echo ================================================================
 if "%AUTO_YES%"=="0" pause
 exit /b 0

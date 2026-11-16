@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kisskh_downloader.models.drama import Episode
 from kisskh_downloader.models.sub import SubItem
 
+from kisskh_app.cli import main as cli_main
 from kisskh_app.client import (
     DramaDetails,
     KissKHService,
@@ -22,7 +26,14 @@ from kisskh_app.client import (
     sanitize_name,
     slugify_title,
 )
-from kisskh_app.config import DEFAULT_BASE_URL, AppConfig, update_env_vars
+from kisskh_app.config import (
+    DEFAULT_BASE_URL,
+    AppConfig,
+    get_config_dir,
+    get_config_path,
+    get_env_path,
+    update_env_vars,
+)
 from kisskh_app.subtitles_mux import (
     FfmpegCapabilities,
     _windows_ffmpeg_candidates,
@@ -34,7 +45,7 @@ from kisskh_app.subtitles_mux import (
     find_windows_package_manager,
     iso639_2_code,
 )
-from kisskh_app.ui import KissKHConsoleApp
+from kisskh_app.ui import KissKHConsoleApp, _install_cli_to_path
 
 
 def _sample_episodes() -> list[Episode]:
@@ -177,6 +188,64 @@ class TestConfigAndEnv(unittest.TestCase):
 
                 update_env_vars({"KISSKH_STREAM_KEY": None}, env_path=env_path)
                 self.assertNotIn("KISSKH_STREAM_KEY", os.environ)
+
+    def test_get_config_dir_with_env_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"KISSGRAB_CONFIG_DIR": tmpdir}):
+                self.assertEqual(get_config_dir(), Path(tmpdir).resolve())
+                self.assertEqual(get_config_path(), Path(tmpdir).resolve() / "config.json")
+                self.assertEqual(get_env_path(), Path(tmpdir).resolve() / ".env")
+
+    def test_get_config_dir_repo_mode(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KISSGRAB_CONFIG_DIR", None)
+            repo_root = Path(__file__).resolve().parent.parent
+            self.assertEqual(get_config_dir(), repo_root)
+
+    def test_get_config_dir_global_mode(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KISSGRAB_CONFIG_DIR", None)
+            fake_config_file = Path("/usr/local/lib/python3.14/site-packages/kisskh_app/config.py")
+
+            with patch("kisskh_app.config.Path") as mock_path_cls:
+                def fake_path_call(p: any) -> Path:
+                    if str(p) == str(fake_config_file):
+                        return fake_config_file
+                    return Path(p)
+
+                mock_path_cls.side_effect = fake_path_call
+                mock_path_cls.home = Path.home
+
+                with patch("kisskh_app.config.__file__", str(fake_config_file)):
+                    # macOS
+                    with patch("kisskh_app.config.sys.platform", "darwin"):
+                        mac_dir = get_config_dir()
+                        self.assertEqual(mac_dir, Path.home() / "Library" / "Application Support" / "kissgrab")
+
+                    # Windows
+                    with patch("kisskh_app.config.sys.platform", "win32"), patch.dict(
+                        os.environ, {"APPDATA": "/fake/appdata/roaming"}
+                    ):
+                        win_dir = get_config_dir()
+                        self.assertEqual(win_dir, Path("/fake/appdata/roaming/kissgrab").resolve())
+
+                    # Linux
+                    with patch("kisskh_app.config.sys.platform", "linux"), patch.dict(
+                        os.environ, {"XDG_CONFIG_HOME": "/home/alice/.config"}
+                    ):
+                        linux_dir = get_config_dir()
+                        self.assertEqual(linux_dir, Path("/home/alice/.config/kissgrab").resolve())
+
+    def test_pyproject_toml_configuration(self) -> None:
+        pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        self.assertTrue(pyproject_path.is_file())
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+        self.assertEqual(data["project"]["name"], "kissgrab")
+        self.assertEqual(data["project"]["version"], "1.0.0")
+        self.assertEqual(data["project"]["scripts"]["kissgrab"], "kisskh_app.cli:main")
+        self.assertTrue(any("kisskh-downloader" in d for d in data["project"]["dependencies"]))
+        self.assertEqual(data["build-system"]["build-backend"], "setuptools.build_meta")
 
 
 class TestKissKHService(unittest.TestCase):
@@ -433,6 +502,45 @@ class TestConsoleUIExit(unittest.TestCase):
             app = KissKHConsoleApp(config=cfg)
             with patch("builtins.input", side_effect=["5"]), patch("click.echo"):
                 app.run()
+
+
+class TestCLI(unittest.TestCase):
+    def test_cli_version(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = cli_main(["--version"])
+        self.assertEqual(ret, 0)
+        output = buf.getvalue()
+        self.assertIn("KissGrab", output)
+        self.assertIn("1.0.0", output)
+
+    def test_cli_help(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = cli_main(["--help"])
+        self.assertEqual(ret, 0)
+        output = buf.getvalue()
+        self.assertIn("Usage:", output)
+        self.assertIn("kissgrab", output)
+
+    def test_cli_query_passed_to_app(self) -> None:
+        with patch("kisskh_app.ui.KissKHConsoleApp.run") as mock_run:
+            ret = cli_main(["Lovely", "Runner"])
+            self.assertEqual(ret, 0)
+            mock_run.assert_called_once_with(initial_query="Lovely Runner")
+
+    def test_install_cli_to_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_home = Path(tmpdir)
+            with patch("kisskh_app.ui.Path.home", return_value=tmp_home), patch(
+                "kisskh_app.ui.os.access", return_value=False
+            ), patch("kisskh_app.ui.sys.platform", "darwin"):
+                ok, msg = _install_cli_to_path()
+                self.assertTrue(ok)
+                self.assertTrue((tmp_home / ".local" / "bin" / "kissgrab").is_symlink())
+                zprofile = tmp_home / ".zprofile"
+                self.assertTrue(zprofile.is_file())
+                self.assertIn(".local/bin", zprofile.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

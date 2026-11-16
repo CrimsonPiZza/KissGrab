@@ -967,6 +967,68 @@ class KissKHConsoleApp:
             else:
                 flash = ("Invalid choice.", "yellow")
 
+
+def _install_cli_to_path() -> tuple[bool, str]:
+    """Install kissgrab shortcut into a directory on system PATH."""
+    repo_root = Path(__file__).resolve().parent.parent
+    if sys.platform == "win32":
+        user_profile = os.getenv("USERPROFILE")
+        if not user_profile:
+            return False, "Could not determine USERPROFILE path."
+        win_apps = Path(user_profile) / "AppData" / "Local" / "Microsoft" / "WindowsApps"
+        run_bat = repo_root / "run.bat"
+        if not run_bat.is_file():
+            return False, f"run.bat not found at {run_bat}"
+        try:
+            win_apps.mkdir(parents=True, exist_ok=True)
+            cmd_file = win_apps / "kissgrab.cmd"
+            cmd_file.write_text(f'@echo off\ncall "{run_bat}" %*\n', encoding="utf-8")
+            return True, f"Installed 'kissgrab' command to {cmd_file}"
+        except OSError as e:
+            return False, f"Failed to write to WindowsApps: {e}"
+    else:
+        run_sh = repo_root / "run.sh"
+        if not run_sh.is_file():
+            return False, f"run.sh not found at {run_sh}"
+
+        usr_local_bin = Path("/usr/local/bin")
+        if os.access(usr_local_bin, os.W_OK):
+            target = usr_local_bin / "kissgrab"
+            try:
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+                target.symlink_to(run_sh)
+                return True, f"Symlinked 'kissgrab' to {target}"
+            except OSError:
+                pass
+
+        user_bin = Path.home() / ".local" / "bin"
+        try:
+            user_bin.mkdir(parents=True, exist_ok=True)
+            target = user_bin / "kissgrab"
+            if target.is_symlink() or target.exists():
+                target.unlink()
+            target.symlink_to(run_sh)
+
+            added_to: list[str] = []
+            for rc_name in (".zprofile", ".zshrc", ".bashrc"):
+                rc_path = Path.home() / rc_name
+                if rc_path.is_file() or rc_name == ".zprofile":
+                    try:
+                        content = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
+                        if str(user_bin) not in content:
+                            with open(rc_path, "a", encoding="utf-8") as f:
+                                f.write(f'\nexport PATH="{user_bin}:$PATH"\n')
+                            added_to.append(rc_name)
+                    except OSError:
+                        pass
+
+            note = f" (added to {', '.join(added_to)})" if added_to else ""
+            return True, f"Symlinked 'kissgrab' to {target}{note}"
+        except OSError as e:
+            return False, f"Failed to install to {user_bin}: {e}"
+
+
     def _auth_menu(self) -> None:
         flash: tuple[str, str] | None = None
         while True:
@@ -1008,10 +1070,11 @@ class KissKHConsoleApp:
                 _echo("  [6] Install FFmpeg via winget / scoop / choco")
             else:
                 _echo("  [6] Install ffmpeg instructions")
+            _echo("  [7] Install 'kissgrab' to System PATH (run from anywhere)")
             _echo("  [0] Back to Main Menu")
             _echo()
 
-            choice = _prompt("Select option [0-6]: ", default="0").lower()
+            choice = _prompt("Select option [0-7]: ", default="0").lower()
             if choice in {"0", "b", "back", ""}:
                 return
             elif choice == "1":
@@ -1060,5 +1123,10 @@ class KissKHConsoleApp:
                     ok = _install_ffmpeg_flow(full=False)
                     flash = ("ffmpeg is ready." if ok else "ffmpeg setup incomplete.", "green" if ok else "yellow")
                     _pause()
+            elif choice == "7":
+                ok, msg = _install_cli_to_path()
+                flash = (msg, "green" if ok else "red")
+                _pause()
             else:
                 flash = ("Invalid choice.", "yellow")
+

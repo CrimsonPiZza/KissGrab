@@ -186,9 +186,68 @@ else
   fi
 fi
 
+# 5. Global Command 'kissgrab' in PATH
+echo
+echo "================================================================"
+echo "  System PATH Setup (Run 'kissgrab' from anywhere)"
+echo "================================================================"
+if confirm "Make the 'kissgrab' command runnable from anywhere in your terminal?"; then
+  LINK_SUCCESS=false
+
+  # Try /usr/local/bin if writable
+  if [[ -w /usr/local/bin ]]; then
+    if ln -sf "$SCRIPT_DIR/run.sh" /usr/local/bin/kissgrab 2>/dev/null; then
+      echo "[ok] Symlinked 'kissgrab' to /usr/local/bin/kissgrab"
+      LINK_SUCCESS=true
+    fi
+  fi
+
+  # Fall back to $HOME/.local/bin
+  if [[ "$LINK_SUCCESS" != "true" ]]; then
+    USER_BIN="$HOME/.local/bin"
+    mkdir -p "$USER_BIN" 2>/dev/null || true
+    if ln -sf "$SCRIPT_DIR/run.sh" "$USER_BIN/kissgrab" 2>/dev/null; then
+      echo "[ok] Symlinked 'kissgrab' to $USER_BIN/kissgrab"
+      LINK_SUCCESS=true
+
+      if [[ ":$PATH:" != *":$USER_BIN:"* ]]; then
+        for RC in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bashrc"; do
+          if [[ -f "$RC" ]] || [[ "$RC" == "$HOME/.zprofile" ]]; then
+            if ! grep -qF "$USER_BIN" "$RC" 2>/dev/null; then
+              echo >> "$RC"
+              echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC"
+              echo "[ok] Added $USER_BIN to $RC"
+            fi
+          fi
+        done
+        echo "    Note: PATH will update in new terminal windows, or run: source ~/.zprofile"
+      fi
+    fi
+  fi
+
+  if [[ "$LINK_SUCCESS" != "true" ]]; then
+    echo "[!] Could not link into PATH automatically without elevated privileges."
+    echo "    Run manually: sudo ln -sf \"$SCRIPT_DIR/run.sh\" /usr/local/bin/kissgrab"
+  fi
+fi
+
+# 6. Optional: Pipx Setup (Homebrew)
+if [[ -n "$BREW_BIN" ]] && ! command -v pipx >/dev/null 2>&1; then
+  echo
+  if confirm "Install 'pipx' via Homebrew (for isolated Python CLI package management)?"; then
+    echo "[*] Installing pipx via Homebrew..."
+    "$BREW_BIN" install pipx
+    eval "$("$BREW_BIN" shellenv)"
+    if command -v pipx >/dev/null 2>&1; then
+      pipx ensurepath >/dev/null 2>&1 || true
+      echo "[ok] pipx installed successfully."
+    fi
+  fi
+fi
+
 echo
 echo "================================================================"
 echo "  Setup Complete!"
-echo "  Start KissGrab anytime with:  ./run.sh"
+echo "  Start KissGrab anytime with:     kissgrab  (or ./run.sh)"
 echo "================================================================"
 
