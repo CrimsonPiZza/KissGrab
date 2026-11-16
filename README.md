@@ -15,16 +15,16 @@ If you don't have `pipx` yet:
 
 #### From GitHub:
 ```bash
-pipx install git+https://github.com/<your-username>/KissGrab.git
+pipx install git+https://github.com/CrimsonPiZza/KissGrab.git
 ```
 *(With Playwright browser support for auto-kkey generation:)*
 ```bash
-pipx install "git+https://github.com/<your-username>/KissGrab.git[browser]"
+pipx install "git+https://github.com/CrimsonPiZza/KissGrab.git[browser]"
 ```
 
 #### From Local Clone:
 ```bash
-git clone https://github.com/<your-username>/KissGrab.git
+git clone https://github.com/CrimsonPiZza/KissGrab.git
 cd KissGrab
 pipx install .
 ```
