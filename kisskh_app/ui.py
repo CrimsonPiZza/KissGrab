@@ -1020,13 +1020,14 @@ class KissKHConsoleApp:
             _echo(f"  [8] Skip Existing Files   : {'On' if self.config.skip_existing else 'Off'}")
             _echo(f"  [9] Skip Recap Episodes   : {'On' if self.config.skip_recap else 'Off'}")
             _echo(f"  [a] Subtitle Decryption   : {'Custom keys (env)' if self.config.decrypt_subtitle else 'Auto (Built-in)'}")
+            _echo(f"  [c] Concurrent Fragments  : {self.config.concurrent_fragments} {'(1=Sequential, safe)' if self.config.concurrent_fragments == 1 else '(Lower = more stable)'}")
             _echo(f"  [v] Verbose Debug Logs    : {'On' if self.config.verbose else 'Off'}")
             _echo("  [0] Back to Main Menu")
             _divider()
             _show_flash(flash)
             flash = None
 
-            choice = _prompt("Edit setting [0-9, a, v]: ", default="0").lower()
+            choice = _prompt("Edit setting [0-9, a, c, v]: ", default="0").lower()
             if choice in {"0", "b", "back", ""}:
                 return
             elif choice == "1":
@@ -1084,6 +1085,16 @@ class KissKHConsoleApp:
                     self.config.decrypt_subtitle = False
                     self.config.save()
                     flash = ("Subtitle decryption reset to automatic defaults.", "green")
+            elif choice == "c":
+                raw = _prompt(
+                    f"Concurrent fragment downloads [1-16, current {self.config.concurrent_fragments}] (1=sequential safe): "
+                ).strip()
+                if raw.isdigit() and 1 <= int(raw) <= 16:
+                    self.config.concurrent_fragments = int(raw)
+                    self.config.save()
+                    flash = (f"Concurrent fragments set to {self.config.concurrent_fragments}", "green")
+                elif raw:
+                    flash = ("Please enter a number between 1 and 16.", "yellow")
             elif choice == "v":
                 self.config.verbose = not self.config.verbose
                 self.config.save()

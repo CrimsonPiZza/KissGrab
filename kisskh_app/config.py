@@ -105,6 +105,7 @@ class AppConfig:
     skip_existing: bool = True
     skip_recap: bool = True
     decrypt_subtitle: bool = False
+    concurrent_fragments: int = 4
     verbose: bool = False
     recent_dramas: list[RecentDrama] = field(default_factory=list)
 
@@ -148,6 +149,9 @@ class AppConfig:
                     cfg.skip_existing = bool(raw.get("skip_existing", True))
                     cfg.skip_recap = bool(raw.get("skip_recap", True))
                     cfg.decrypt_subtitle = bool(raw.get("decrypt_subtitle", False))
+                    raw_frag = raw.get("concurrent_fragments")
+                    if isinstance(raw_frag, int) and 1 <= raw_frag <= 16:
+                        cfg.concurrent_fragments = raw_frag
                     cfg.verbose = bool(raw.get("verbose", False))
 
                     raw_recent = raw.get("recent_dramas")

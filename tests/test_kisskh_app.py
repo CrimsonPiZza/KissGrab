@@ -18,6 +18,7 @@ from kisskh_app.cli import main as cli_main
 from kisskh_app.client import (
     DramaDetails,
     KissKHService,
+    cleanup_orphaned_fragments,
     format_episode_num,
     format_episode_tag,
     get_local_downloaded_episodes,
@@ -334,6 +335,56 @@ class TestKissKHService(unittest.TestCase):
             )
             service.downloader.download_subtitles.assert_called_once()
             service.api.cleanup.assert_called_once()
+
+    def test_cleanup_orphaned_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            prefix = p / "Show_E37"
+            (p / "Show_E37.mp4.part-Frag401").write_bytes(b"bad-frag")
+            (p / "Show_E37.mp4.part-Frag402").write_bytes(b"bad-frag")
+            (p / "Show_E37.mp4.ytdl").write_bytes(b"meta")
+            (p / "Show_E37.mp4.part").write_bytes(b"partial-data")
+            (p / "Show_E37.mp4").write_bytes(b"completed-video")
+            (p / "Show_E36.mp4.part").write_bytes(b"other-show")
+
+            cleaned = cleanup_orphaned_fragments(prefix)
+            self.assertEqual(cleaned, 4)
+            self.assertFalse((p / "Show_E37.mp4.part-Frag401").exists())
+            self.assertFalse((p / "Show_E37.mp4.part-Frag402").exists())
+            self.assertFalse((p / "Show_E37.mp4.ytdl").exists())
+            self.assertFalse((p / "Show_E37.mp4.part").exists())
+            self.assertTrue((p / "Show_E37.mp4").exists())
+            self.assertTrue((p / "Show_E36.mp4.part").exists())
+
+    def test_download_video_stream_fragment_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            service = KissKHService()
+            service.concurrent_fragments = 4
+
+            calls: list[dict] = []
+
+            def fake_download(self_ydl, urls):
+                calls.append(self_ydl.params)
+                if len(calls) == 1:
+                    raise Exception("fragment 410 not found; Skipping fragment 410 ...")
+                return 0
+
+            with patch("yt_dlp.YoutubeDL.YoutubeDL.download", fake_download):
+                emitted: list[str] = []
+                service._download_video_stream(
+                    video_stream_url="https://example.com/ep.m3u8",
+                    filepath=str(p / "Show_E01"),
+                    quality="720p",
+                    concurrent_fragments=4,
+                    emit=emitted.append,
+                )
+
+            # First attempt was concurrent (4), second attempt fell back to sequential (1)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["concurrent_fragment_downloads"], 4)
+            self.assertEqual(calls[1]["concurrent_fragment_downloads"], 1)
+            self.assertTrue(any("switching to stable sequential mode" in m for m in emitted))
 
 
 class TestSubtitleMuxAndBurn(unittest.TestCase):

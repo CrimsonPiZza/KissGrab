@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 import validators
+import yt_dlp
 from kisskh_downloader.downloader import Downloader
 from kisskh_downloader.helper.decrypt_subtitle import SubtitleDecrypter
 from kisskh_downloader.kisskh_api import KissKHApi
@@ -139,6 +140,29 @@ def format_episode_num(num: float) -> str:
     if num == int(num):
         return str(int(num))
     return f"{num:g}"
+
+
+def cleanup_orphaned_fragments(filepath_prefix: Path) -> int:
+    """Remove leftover .part, .part-Frag*, and .ytdl files from interrupted downloads."""
+    target_dir = filepath_prefix.parent
+    if not target_dir.is_dir():
+        return 0
+    prefix = filepath_prefix.name
+    cleaned = 0
+    for item in target_dir.iterdir():
+        if item.is_file() and item.name.startswith(prefix):
+            name_lower = item.name.lower()
+            if (
+                ".part" in name_lower
+                or ".ytdl" in name_lower
+                or name_lower.endswith(".temp")
+            ):
+                try:
+                    item.unlink(missing_ok=True)
+                    cleaned += 1
+                except OSError:
+                    pass
+    return cleaned
 
 
 def parse_user_input(raw: str) -> ParsedInput:
@@ -385,6 +409,84 @@ class KissKHService:
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.api = KissKHApi(base_url=self.base_url)
         self.downloader = Downloader(referer=self.base_url)
+        self.downloader.download_video_from_stream_url = self._download_video_stream
+        self.concurrent_fragments = 4
+        self._emit: Callable[[str], None] | None = None
+
+    def _download_video_stream(
+        self,
+        video_stream_url: str,
+        filepath: str,
+        quality: str,
+        concurrent_fragments: int | None = None,
+        emit: Callable[[str], None] | None = None,
+    ) -> None:
+        """Download video stream with fragment retry, backoff, and sequential fallback."""
+        filepath_prefix = Path(filepath)
+        filepath_prefix.parent.mkdir(parents=True, exist_ok=True)
+        cleanup_orphaned_fragments(filepath_prefix)
+
+        effective_fragments = concurrent_fragments or self.concurrent_fragments or 4
+        effective_emit = emit or self._emit
+
+        def _build_opts(concurrency: int, retries: int = 5, fragment_retries: int = 3) -> dict[str, Any]:
+            return {
+                "format": f"bestvideo[height<={quality[:-1]}]+bestaudio/best[height<={quality[:-1]}]/best",
+                "outtmpl": f"{filepath_prefix}.%(ext)s",
+                "http_headers": {
+                    "Referer": self.base_url,
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/147.0.0.0 Safari/537.36"
+                    ),
+                },
+                "retries": retries,
+                "fragment_retries": fragment_retries,
+                "skip_unavailable_fragments": True,
+                "buffersize": 1024 * 64,
+                "continuedl": False,
+                "retry_sleep_functions": {
+                    "http": lambda n: min(1.0 * n, 5.0),
+                    "fragment": lambda n: min(1.0 * n, 3.0),
+                },
+                "concurrent_fragment_downloads": max(1, concurrency),
+                "verbose": logger.getEffectiveLevel() == logging.DEBUG,
+            }
+
+        try:
+            opts = _build_opts(effective_fragments, retries=5, fragment_retries=3)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([video_stream_url])
+        except Exception as exc:
+            err_msg = str(exc)
+            is_fragment_err = (
+                "fragment" in err_msg.lower()
+                or "part-frag" in err_msg.lower()
+                or "errno 2" in err_msg.lower()
+                or "conflicting range" in err_msg.lower()
+                or isinstance(exc, FileNotFoundError)
+            )
+            if effective_fragments > 1 and is_fragment_err:
+                if effective_emit:
+                    effective_emit(
+                        f"  [warn] Download interrupted ({exc}). "
+                        "Cleaning partial fragments and switching to stable sequential mode..."
+                    )
+                cleanup_orphaned_fragments(filepath_prefix)
+                fallback_opts = _build_opts(1, retries=5, fragment_retries=2)
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        ydl.download([video_stream_url])
+                except Exception:
+                    if effective_emit:
+                        effective_emit("  [warn] Sequential download failed. Resetting files and restarting clean...")
+                    cleanup_orphaned_fragments(filepath_prefix)
+                    clean_opts = _build_opts(1, retries=5, fragment_retries=2)
+                    with yt_dlp.YoutubeDL(clean_opts) as ydl:
+                        ydl.download([video_stream_url])
+            else:
+                raise
 
     def search(self, query: str) -> list[DramaInfo]:
         results = self.api.search_dramas_by_query(query)
@@ -437,6 +539,8 @@ class KissKHService:
         on_status: Callable[[str], None] | None = None,
     ) -> DownloadSummary:
         emit = on_status or (lambda _msg: None)
+        self.concurrent_fragments = config.concurrent_fragments
+        self._emit = emit
         output_root = config.resolved_output_dir()
         drama_dir_name = sanitize_name(drama.title)
         target_dir = output_root / drama_dir_name
