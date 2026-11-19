@@ -48,9 +48,17 @@ def main(args: list[str] | None = None) -> int:
         print("Usage:")
         print("  kissgrab                     Launch interactive menu")
         print("  kissgrab <query or URL>      Search drama or open URL directly")
+        print("  kissgrab merge [folder|file] Merge local videos and subtitles without re-downloading")
         print("  kissgrab --version           Show version")
         print("  kissgrab --help              Show this help message")
         return 0
+
+    if args and args[0] in ("merge", "--merge"):
+        from kisskh_app.ui import KissKHConsoleApp
+
+        target = " ".join(args[1:]).strip() or None
+        app = KissKHConsoleApp()
+        return app.merge_local_cli(target=target)
 
     from kisskh_app.ui import KissKHConsoleApp
 

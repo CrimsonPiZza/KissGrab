@@ -35,6 +35,7 @@ from kisskh_app.config import (
     update_env_vars,
 )
 from kisskh_app.subtitles_mux import (
+    SUBTITLE_EXTENSIONS,
     FfmpegCapabilities,
     _windows_ffmpeg_candidates,
     burn_subtitle_into_video,
@@ -42,10 +43,11 @@ from kisskh_app.subtitles_mux import (
     embed_subtitles_in_video,
     escape_ffmpeg_filter_path,
     find_brew_binary,
+    find_local_mergeable_pairs,
     find_windows_package_manager,
     iso639_2_code,
 )
-from kisskh_app.ui import KissKHConsoleApp, _install_cli_to_path
+from kisskh_app.ui import KissKHConsoleApp, _confirm, _install_cli_to_path
 
 
 def _sample_episodes() -> list[Episode]:
@@ -494,13 +496,44 @@ class TestSubtitleMuxAndBurn(unittest.TestCase):
             self.assertTrue(any("chocolatey" in c for c in candidates))
             self.assertTrue(any("WinGet" in c for c in candidates))
 
+    def test_txt2_subtitle_extensions_and_mergeable_pairs(self) -> None:
+        self.assertIn(".txt2", SUBTITLE_EXTENSIONS)
+        self.assertIn(".txt", SUBTITLE_EXTENSIONS)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            vid = folder / "Tigers Sniff the Rose (2026)_E36.mp4"
+            vid.write_bytes(b"dummy-mp4-video-bytes")
+            sub = folder / "Tigers Sniff the Rose (2026)_E36.en.txt2"
+            sub.write_text("1\n00:00:01,000 --> 00:00:04,000\nHello Rose!\n", encoding="utf-8")
+
+            # 1. Scan directory
+            pairs = find_local_mergeable_pairs(folder)
+            self.assertEqual(len(pairs), 1)
+            pair_vid, pair_subs = pairs[0]
+            self.assertEqual(pair_vid, vid)
+            self.assertEqual(len(pair_subs), 1)
+            self.assertEqual(pair_subs[0][0], sub)
+            self.assertEqual(pair_subs[0][1], "en")
+            self.assertEqual(pair_subs[0][2], "English")
+
+            # 2. Pointing directly to single video file
+            pairs_vid = find_local_mergeable_pairs(vid)
+            self.assertEqual(len(pairs_vid), 1)
+            self.assertEqual(pairs_vid[0][0], vid)
+
+            # 3. Pointing directly to single subtitle file
+            pairs_sub = find_local_mergeable_pairs(sub)
+            self.assertEqual(len(pairs_sub), 1)
+            self.assertEqual(pairs_sub[0][0], vid)
+
 
 class TestConsoleUIExit(unittest.TestCase):
     def test_main_menu_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = AppConfig(output_dir=tmpdir)
             app = KissKHConsoleApp(config=cfg)
-            with patch("builtins.input", side_effect=["5"]), patch("click.echo"):
+            with patch("builtins.input", side_effect=["6"]), patch("click.echo"):
                 app.run()
 
 
@@ -529,6 +562,12 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(ret, 0)
             mock_run.assert_called_once_with(initial_query="Lovely Runner")
 
+    def test_cli_merge_invocation(self) -> None:
+        with patch("kisskh_app.ui.KissKHConsoleApp.merge_local_cli", return_value=0) as mock_merge:
+            ret = cli_main(["merge", "/path/to/folder"])
+            self.assertEqual(ret, 0)
+            mock_merge.assert_called_once_with(target="/path/to/folder")
+
     def test_install_cli_to_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_home = Path(tmpdir)
@@ -541,6 +580,29 @@ class TestCLI(unittest.TestCase):
                 zprofile = tmp_home / ".zprofile"
                 self.assertTrue(zprofile.is_file())
                 self.assertIn(".local/bin", zprofile.read_text(encoding="utf-8"))
+
+    def test_confirm_helper(self) -> None:
+        with patch("kisskh_app.ui.input", side_effect=["y", "n", ""]):
+            self.assertTrue(_confirm("Proceed?"))
+            self.assertFalse(_confirm("Proceed?"))
+            self.assertTrue(_confirm("Proceed?", default=True))
+
+    def test_merge_local_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            vid = folder / "Tigers Sniff the Rose (2026)_E36.mp4"
+            vid.write_bytes(b"dummy-mp4")
+            sub = folder / "Tigers Sniff the Rose (2026)_E36.en.txt2"
+            sub.write_text("1\n00:00:01,000 --> 00:00:04,000\nHello\n", encoding="utf-8")
+
+            app = KissKHConsoleApp(config=AppConfig(output_dir=str(folder)))
+            with patch("kisskh_app.ui.input", side_effect=["1", "n", "y", ""]):
+                with patch("kisskh_app.ui.embed_subtitles_in_video", return_value=vid) as mock_embed:
+                    with redirect_stdout(io.StringIO()):
+                        res = app._merge_local_flow(initial_target=str(folder))
+                    self.assertIsNotNone(res)
+                    self.assertIn("Successfully merged 1 of 1 episode(s)", res[0])
+                    mock_embed.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -33,8 +33,12 @@ from kisskh_app.config import (
     update_env_vars,
 )
 from kisskh_app.subtitles_mux import (
+    auto_decrypt_subtitle_file,
+    burn_subtitle_into_video,
     detect_ffmpeg_capabilities,
+    embed_subtitles_in_video,
     find_brew_binary,
+    find_local_mergeable_pairs,
     find_windows_package_manager,
 )
 
@@ -86,6 +90,13 @@ def _prompt(label: str, default: str | None = None) -> str:
     if not stripped and default is not None:
         return default
     return stripped
+
+
+def _confirm(label: str, default: bool = True) -> bool:
+    hint = "[Y/n]" if default else "[y/N]"
+    default_str = "y" if default else "n"
+    ans = _prompt(f"{label} {hint}: ", default=default_str).strip().lower()
+    return ans in {"y", "yes"}
 
 
 def _pause(msg: str = "Press Enter to continue...") -> None:
@@ -384,14 +395,16 @@ class KissKHConsoleApp:
                 elif choice == "2":
                     flash = self._recent_series_flow()
                 elif choice == "3":
-                    self._settings_menu()
+                    flash = self._merge_local_flow()
                 elif choice == "4":
+                    self._settings_menu()
+                elif choice == "5":
                     self._auth_menu()
-                elif choice in {"5", "q", "quit", "exit"}:
+                elif choice in {"6", "q", "quit", "exit"}:
                     _echo(_c(f"Goodbye from {APP_NAME}!", fg="cyan"))
                     break
                 else:
-                    flash = ("Unknown option. Choose 1-5.", "yellow")
+                    flash = ("Unknown option. Choose 1-6.", "yellow")
         except KeyboardInterrupt:
             _echo(_c("\nExiting cleanly.", dim=True))
         finally:
@@ -425,11 +438,122 @@ class KissKHConsoleApp:
 
         _echo(f"  {_c('[1]', fg='cyan', bold=True)} Search or Paste URL & Download  {_c('(Enter)', dim=True)}")
         _echo(f"  {_c('[2]', fg='cyan', bold=True)} Recent Series{recent_hint}")
-        _echo(f"  {_c('[3]', fg='cyan', bold=True)} Settings & Defaults")
-        _echo(f"  {_c('[4]', fg='cyan', bold=True)} Setup & Tools (Auth, Playwright, ffmpeg)")
-        _echo(f"  {_c('[5]', fg='cyan', bold=True)} Exit")
+        _echo(f"  {_c('[3]', fg='cyan', bold=True)} Merge Local Videos & Subtitles")
+        _echo(f"  {_c('[4]', fg='cyan', bold=True)} Settings & Defaults")
+        _echo(f"  {_c('[5]', fg='cyan', bold=True)} Setup & Tools (Auth, Playwright, ffmpeg)")
+        _echo(f"  {_c('[6]', fg='cyan', bold=True)} Exit")
         _echo()
         return _prompt("Select option [1]: ", default="1").lower()
+
+    def merge_local_cli(self, target: str | None = None) -> int:
+        flash = self._merge_local_flow(initial_target=target)
+        if flash:
+            _show_flash(flash)
+            return 0 if flash[1] == "green" else 1
+        return 0
+
+    def _merge_local_flow(self, initial_target: str | None = None) -> tuple[str, str] | None:
+        _banner("Merge Local Videos & Subtitles")
+        _echo("Combine downloaded video files with subtitle files (.srt, .vtt, .txt2, .txt)")
+        _echo("in the same folder without having to re-download anything.")
+        _echo()
+
+        default_dir = self.config.resolved_output_dir()
+        if self.config.recent_dramas:
+            candidate = default_dir / sanitize_name(self.config.recent_dramas[0].title)
+            if candidate.is_dir():
+                default_dir = candidate
+
+        raw_target = initial_target
+        if not raw_target:
+            _echo("Target path (folder, video file, or subtitle file)")
+            raw_target = _prompt(f"Path (Enter for '{default_dir}'): ", default=str(default_dir)).strip()
+
+        if not raw_target or raw_target.lower() in {"b", "back"}:
+            return None
+
+        clean_path = raw_target.strip("\"'")
+        target = Path(clean_path).expanduser().resolve()
+        if not target.exists():
+            return (f"Path not found: {target}", "red")
+
+        pairs = find_local_mergeable_pairs(target)
+        if not pairs:
+            return (
+                f"No video + subtitle pairs found in {target.name}. "
+                "Ensure video and subtitle share the same prefix (e.g. Show_E01.mp4 & Show_E01.en.txt2).",
+                "yellow",
+            )
+
+        caps = detect_ffmpeg_capabilities()
+        if not caps.can_embed:
+            return ("ffmpeg is required for merging subtitles. Install it in [5] Setup & Tools.", "red")
+
+        _echo()
+        _echo(_c(f"Found {len(pairs)} video file(s) with matching subtitles:", fg="cyan", bold=True))
+        for idx, (vid, subs) in enumerate(pairs[:10], start=1):
+            sub_summary = ", ".join(f"{s[0].name} ({s[2] or s[1]})" for s in subs)
+            _echo(f"  [{idx}] {vid.name}  ->  {sub_summary}")
+        if len(pairs) > 10:
+            _echo(f"  ... and {len(pairs) - 10} more episode(s).")
+
+        _echo()
+        _echo("Subtitle Mode:")
+        _echo(f"  [1] Embed in Video Container (Fast & lossless track inside MP4/MKV) {_c('(Recommended)', fg='green')}")
+        burn_hint = " (requires ffmpeg with libass)" if not caps.can_burn else ""
+        _echo(f"  [2] Bake Subtitles into Video Frames{burn_hint}")
+        mode_choice = _prompt("Choose mode [1]: ", default="1").strip()
+        selected_mode = "burn" if mode_choice == "2" else "embed"
+
+        if selected_mode == "burn" and not caps.can_burn:
+            _echo(_c("\n[!] Warning: Your current ffmpeg does not have the 'subtitles' filter (libass).", fg="yellow"))
+            _echo("    Falling back to safe container embedding (mov_text in MP4).")
+            selected_mode = "embed"
+
+        keep_srt_ans = _prompt("Keep original subtitle files after merging? [y/N]: ", default="N").strip().lower()
+        keep_srt = keep_srt_ans in {"y", "yes"}
+
+        _echo()
+        if not _confirm(f"Proceed with merging {len(pairs)} episode(s)?"):
+            return ("Merge cancelled.", "yellow")
+
+        _echo()
+        merged_count = 0
+        ffmpeg_bin = caps.burn_ffmpeg_path if (selected_mode == "burn" and caps.burn_ffmpeg_path) else caps.ffmpeg_path
+
+        for idx, (vid_path, sub_entries) in enumerate(pairs, start=1):
+            _echo(f"[{idx}/{len(pairs)}] Merging {vid_path.name}...")
+            for sub_path, _, _ in sub_entries:
+                try:
+                    if auto_decrypt_subtitle_file(sub_path):
+                        _echo(f"  {_c('[ok]', fg='green')} Decrypted subtitle {sub_path.name}")
+                except Exception as exc:
+                    _echo(f"  {_c('[warn]', fg='yellow')} Decryption check on {sub_path.name}: {exc}")
+            try:
+                if selected_mode == "burn":
+                    burn_subtitle_into_video(
+                        video_path=vid_path,
+                        primary_sub=sub_entries[0][0],
+                        all_sub_paths=[s[0] for s in sub_entries],
+                        ffmpeg_bin=ffmpeg_bin,
+                        has_libx264=caps.has_libx264,
+                        has_videotoolbox=caps.has_videotoolbox,
+                        keep_srt=keep_srt,
+                    )
+                else:
+                    embed_subtitles_in_video(
+                        video_path=vid_path,
+                        sub_entries=sub_entries,
+                        ffmpeg_bin=ffmpeg_bin,
+                        keep_srt=keep_srt,
+                    )
+                merged_count += 1
+                _echo(f"  {_c('[ok]', fg='green')} Merged successfully.")
+            except Exception as exc:
+                _echo(f"  {_c('[error]', fg='red')} Failed: {exc}")
+
+        _pause()
+        return (f"Successfully merged {merged_count} of {len(pairs)} episode(s).", "green" if merged_count else "red")
 
     def _search_or_url_flow(self, initial_input: str | None = None) -> None:
         raw_input = initial_input
@@ -895,7 +1019,7 @@ class KissKHConsoleApp:
             _echo(f"  [7] Output Directory      : {self.config.resolved_output_dir()}")
             _echo(f"  [8] Skip Existing Files   : {'On' if self.config.skip_existing else 'Off'}")
             _echo(f"  [9] Skip Recap Episodes   : {'On' if self.config.skip_recap else 'Off'}")
-            _echo(f"  [a] Decrypt Subtitles     : {'On' if self.config.decrypt_subtitle else 'Off'}")
+            _echo(f"  [a] Subtitle Decryption   : {'Custom keys (env)' if self.config.decrypt_subtitle else 'Auto (Built-in)'}")
             _echo(f"  [v] Verbose Debug Logs    : {'On' if self.config.verbose else 'Off'}")
             _echo("  [0] Back to Main Menu")
             _divider()
@@ -955,79 +1079,17 @@ class KissKHConsoleApp:
             elif choice == "a":
                 if not self.config.decrypt_subtitle:
                     if _configure_decrypt_keys(self.config):
-                        flash = ("Subtitle decryption enabled.", "green")
+                        flash = ("Custom subtitle decryption keys enabled.", "green")
                 else:
                     self.config.decrypt_subtitle = False
                     self.config.save()
-                    flash = ("Subtitle decryption disabled.", "green")
+                    flash = ("Subtitle decryption reset to automatic defaults.", "green")
             elif choice == "v":
                 self.config.verbose = not self.config.verbose
                 self.config.save()
                 flash = (f"Verbose debug logs: {'On' if self.config.verbose else 'Off'}", "green")
             else:
                 flash = ("Invalid choice.", "yellow")
-
-
-def _install_cli_to_path() -> tuple[bool, str]:
-    """Install kissgrab shortcut into a directory on system PATH."""
-    repo_root = Path(__file__).resolve().parent.parent
-    if sys.platform == "win32":
-        user_profile = os.getenv("USERPROFILE")
-        if not user_profile:
-            return False, "Could not determine USERPROFILE path."
-        win_apps = Path(user_profile) / "AppData" / "Local" / "Microsoft" / "WindowsApps"
-        run_bat = repo_root / "run.bat"
-        if not run_bat.is_file():
-            return False, f"run.bat not found at {run_bat}"
-        try:
-            win_apps.mkdir(parents=True, exist_ok=True)
-            cmd_file = win_apps / "kissgrab.cmd"
-            cmd_file.write_text(f'@echo off\ncall "{run_bat}" %*\n', encoding="utf-8")
-            return True, f"Installed 'kissgrab' command to {cmd_file}"
-        except OSError as e:
-            return False, f"Failed to write to WindowsApps: {e}"
-    else:
-        run_sh = repo_root / "run.sh"
-        if not run_sh.is_file():
-            return False, f"run.sh not found at {run_sh}"
-
-        usr_local_bin = Path("/usr/local/bin")
-        if os.access(usr_local_bin, os.W_OK):
-            target = usr_local_bin / "kissgrab"
-            try:
-                if target.is_symlink() or target.exists():
-                    target.unlink()
-                target.symlink_to(run_sh)
-                return True, f"Symlinked 'kissgrab' to {target}"
-            except OSError:
-                pass
-
-        user_bin = Path.home() / ".local" / "bin"
-        try:
-            user_bin.mkdir(parents=True, exist_ok=True)
-            target = user_bin / "kissgrab"
-            if target.is_symlink() or target.exists():
-                target.unlink()
-            target.symlink_to(run_sh)
-
-            added_to: list[str] = []
-            for rc_name in (".zprofile", ".zshrc", ".bashrc"):
-                rc_path = Path.home() / rc_name
-                if rc_path.is_file() or rc_name == ".zprofile":
-                    try:
-                        content = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
-                        if str(user_bin) not in content:
-                            with open(rc_path, "a", encoding="utf-8") as f:
-                                f.write(f'\nexport PATH="{user_bin}:$PATH"\n')
-                            added_to.append(rc_name)
-                    except OSError:
-                        pass
-
-            note = f" (added to {', '.join(added_to)})" if added_to else ""
-            return True, f"Symlinked 'kissgrab' to {target}{note}"
-        except OSError as e:
-            return False, f"Failed to install to {user_bin}: {e}"
-
 
     def _auth_menu(self) -> None:
         flash: tuple[str, str] | None = None
@@ -1130,3 +1192,62 @@ def _install_cli_to_path() -> tuple[bool, str]:
             else:
                 flash = ("Invalid choice.", "yellow")
 
+def _install_cli_to_path() -> tuple[bool, str]:
+    """Install kissgrab shortcut into a directory on system PATH."""
+    repo_root = Path(__file__).resolve().parent.parent
+    if sys.platform == "win32":
+        user_profile = os.getenv("USERPROFILE")
+        if not user_profile:
+            return False, "Could not determine USERPROFILE path."
+        win_apps = Path(user_profile) / "AppData" / "Local" / "Microsoft" / "WindowsApps"
+        run_bat = repo_root / "run.bat"
+        if not run_bat.is_file():
+            return False, f"run.bat not found at {run_bat}"
+        try:
+            win_apps.mkdir(parents=True, exist_ok=True)
+            cmd_file = win_apps / "kissgrab.cmd"
+            cmd_file.write_text(f'@echo off\ncall "{run_bat}" %*\n', encoding="utf-8")
+            return True, f"Installed 'kissgrab' command to {cmd_file}"
+        except OSError as e:
+            return False, f"Failed to write to WindowsApps: {e}"
+    else:
+        run_sh = repo_root / "run.sh"
+        if not run_sh.is_file():
+            return False, f"run.sh not found at {run_sh}"
+
+        usr_local_bin = Path("/usr/local/bin")
+        if os.access(usr_local_bin, os.W_OK):
+            target = usr_local_bin / "kissgrab"
+            try:
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+                target.symlink_to(run_sh)
+                return True, f"Symlinked 'kissgrab' to {target}"
+            except OSError:
+                pass
+
+        user_bin = Path.home() / ".local" / "bin"
+        try:
+            user_bin.mkdir(parents=True, exist_ok=True)
+            target = user_bin / "kissgrab"
+            if target.is_symlink() or target.exists():
+                target.unlink()
+            target.symlink_to(run_sh)
+
+            added_to: list[str] = []
+            for rc_name in (".zprofile", ".zshrc", ".bashrc"):
+                rc_path = Path.home() / rc_name
+                if rc_path.is_file() or rc_name == ".zprofile":
+                    try:
+                        content = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
+                        if str(user_bin) not in content:
+                            with open(rc_path, "a", encoding="utf-8") as f:
+                                f.write(f'\nexport PATH="{user_bin}:$PATH"\n')
+                            added_to.append(rc_name)
+                    except OSError:
+                        pass
+
+            note = f" (added to {', '.join(added_to)})" if added_to else ""
+            return True, f"Symlinked 'kissgrab' to {target}{note}"
+        except OSError as e:
+            return False, f"Failed to install to {user_bin}: {e}"

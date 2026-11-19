@@ -91,12 +91,16 @@ kissgrab "Queen of Tears"
 # Open a KissKH drama or episode URL directly
 kissgrab "https://kisskh.do/Drama/A-Business-Proposal?id=4608"
 
+# Merge local videos & subtitles without re-downloading (folder or single episode)
+kissgrab merge "/path/to/Tigers Sniff the Rose (2026)"
+kissgrab merge "/path/to/Tigers Sniff the Rose (2026)_E36.mp4"
+
 # Show version or help
 kissgrab --version
 kissgrab --help
 ```
 
-*(When using `./run.sh` or `python main.py`, pass arguments the same way: `./run.sh "Queen of Tears"`)*
+*(When using `./run.sh` or `python main.py`, pass arguments the same way: `./run.sh merge`)*
 
 ## Features
 
@@ -106,6 +110,7 @@ kissgrab --help
 - **Flexible episode range syntax**: `1-5`, `3`, `5-`, `last 3`, `1-3, 7`, or press `Enter` for all episodes.
 - **Skip existing files**: safely resume interrupted range downloads without re-downloading completed episodes.
 - **Automatic subtitle integration**: choose between **Separate `.srt`**, **Embed in Video** (muxed track inside `.mp4`/`.mkv` — instant & lossless), or **Bake into Video** (hardcoded permanent subtitles via `ffmpeg-full` / `libass`).
+- **Local Merge Tool**: combine previously downloaded videos and `.txt2` / `.srt` / `.vtt` subtitles locally in seconds without re-downloading!
 - **Recent series quick-pick**: resume ongoing or partially downloaded shows with one keypress.
 - **Frictionless `kkey` setup**: checks Playwright + Chromium or saved `.env` keys (`KISSKH_STREAM_KEY`, `KISSKH_SUB_KEY`) and guides setup right inside the menu.
 - **Cross-platform config persistence**:

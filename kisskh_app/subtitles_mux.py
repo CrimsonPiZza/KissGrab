@@ -7,8 +7,21 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pysrt
+from kisskh_downloader.helper.aes_cipher import AESCipher
+
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".ts", ".webm", ".avi", ".mov", ".m4v", ".flv"}
-SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa"}
+SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa", ".txt2", ".txt1", ".txt"}
+
+# Known KissKH subtitle AES-CBC decryption keys:
+# txt2: Format used for newer releases (e.g. Episode 36+)
+# txt1: Format used for intermediate releases
+# txt:  Legacy releases
+KNOWN_SUBTITLE_KEYS: list[tuple[str, str]] = [
+    ("sWODXX04QRTkHdlZ", "8pwhapJeC4hrS9hO"),  # .txt2 (Episodes 36+)
+    ("AmSmZVcH93UQUezi", "ReBKWW8cqdjPEnF6"),  # .txt1
+    ("8056483646328763", "6852612370185273"),  # .txt (legacy)
+]
 
 _LANG_MAP = {
     "en": "eng",
@@ -105,6 +118,126 @@ def iso639_2_code(lang: str) -> str:
     if len(cleaned) == 3 and cleaned.isalpha():
         return cleaned
     return "und"
+
+
+_LANG_NAMES = {
+    "eng": "English",
+    "en": "English",
+    "ind": "Indonesian",
+    "id": "Indonesian",
+    "msa": "Malay",
+    "ms": "Malay",
+    "vie": "Vietnamese",
+    "vi": "Vietnamese",
+    "tha": "Thai",
+    "th": "Thai",
+    "zho": "Chinese",
+    "zh": "Chinese",
+    "kor": "Korean",
+    "ko": "Korean",
+    "jpn": "Japanese",
+    "ja": "Japanese",
+    "ara": "Arabic",
+    "ar": "Arabic",
+    "spa": "Spanish",
+    "es": "Spanish",
+    "fra": "French",
+    "fr": "French",
+    "deu": "German",
+    "de": "German",
+    "por": "Portuguese",
+    "pt": "Portuguese",
+    "rus": "Russian",
+    "ru": "Russian",
+    "fil": "Filipino",
+    "tl": "Filipino",
+    "hin": "Hindi",
+    "hi": "Hindi",
+}
+
+
+def language_label(lang: str) -> str:
+    cleaned = (lang or "").strip().lower()
+    return _LANG_NAMES.get(cleaned, cleaned.capitalize() if cleaned and cleaned != "und" else "")
+
+
+def _probe_sub_format(path: Path) -> str | None:
+    """Detect whether a subtitle file with non-standard extension is SRT or WebVTT."""
+    if path.suffix.lower() not in {".txt2", ".txt1", ".txt"}:
+        return None
+    try:
+        sample = path.read_bytes()[:128]
+        if b"WEBVTT" in sample:
+            return "webvtt"
+        return "srt"
+    except OSError:
+        return "srt"
+
+
+def auto_decrypt_subtitle_file(
+    file_path: Path,
+    custom_key: str | None = None,
+    custom_iv: str | None = None,
+) -> bool:
+    """Detect if a subtitle file (.txt2/.txt1/.txt/.srt) is encrypted and decrypt in-place.
+
+    Returns True if the file was decrypted, or False if already plain text / not encrypted.
+    """
+    if not file_path.is_file() or file_path.stat().st_size == 0:
+        return False
+
+    try:
+        subs = pysrt.open(str(file_path), encoding="utf-8")
+    except Exception:
+        try:
+            subs = pysrt.open(str(file_path))
+        except Exception:
+            return False
+
+    if not subs:
+        return False
+
+    # Find first cue with non-empty text to test decryption
+    sample = ""
+    for sub in subs[:10]:
+        sample = (sub.text or "").strip()
+        if sample:
+            break
+    if not sample:
+        return False
+
+    candidate_keys: list[tuple[str, str]] = []
+    env_key = custom_key or os.getenv("KISSKH_KEY")
+    env_iv = custom_iv or os.getenv("KISSKH_INITIALIZATION_VECTOR")
+    if env_key and env_iv:
+        candidate_keys.append((env_key, env_iv))
+    candidate_keys.extend(KNOWN_SUBTITLE_KEYS)
+
+    active_cipher: AESCipher | None = None
+    for k, iv in candidate_keys:
+        try:
+            c = AESCipher(k, iv)
+            dec = c.decrypt(sample)
+            if dec and any(ch.isalpha() for ch in dec):
+                active_cipher = c
+                break
+        except Exception:
+            continue
+
+    if active_cipher is None:
+        return False
+
+    for sub in subs:
+        raw_text = (sub.text or "").strip()
+        if not raw_text:
+            continue
+        try:
+            sub.text = active_cipher.decrypt(raw_text)
+        except Exception:
+            pass
+
+    subs.save(str(file_path), encoding="utf-8")
+    return True
 
 
 def find_brew_binary() -> str | None:
@@ -327,6 +460,13 @@ def embed_subtitles_in_video(
     if not sub_entries:
         return video_path
 
+    # Ensure all subtitles are decrypted in-place before embedding
+    for sub_path, _, _ in sub_entries:
+        try:
+            auto_decrypt_subtitle_file(sub_path)
+        except Exception:
+            pass
+
     use_mkv_first = video_path.suffix.lower() in {".mkv", ".webm"}
     attempts = [(".mkv", "srt")] if use_mkv_first else [(".mp4", "mov_text"), (".mkv", "srt")]
 
@@ -335,6 +475,9 @@ def embed_subtitles_in_video(
         temp_output = video_path.with_name(f"{video_path.stem}.muxing{target_ext}")
         cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path)]
         for sub_path, _, _ in sub_entries:
+            sub_fmt = _probe_sub_format(sub_path)
+            if sub_fmt:
+                cmd.extend(["-f", sub_fmt])
             cmd.extend(["-i", str(sub_path)])
 
         cmd.extend(["-map", "0:v", "-map", "0:a?"])
@@ -383,8 +526,28 @@ def burn_subtitle_into_video(
     keep_srt: bool = False,
 ) -> Path:
     """Hardcode (bake) a subtitle file permanently onto the video frames."""
+    # Ensure all subtitles are decrypted in-place before burning
+    for sub_path in set([primary_sub, *all_sub_paths]):
+        try:
+            auto_decrypt_subtitle_file(sub_path)
+        except Exception:
+            pass
+
     temp_output = video_path.with_name(f"{video_path.stem}.burning.mp4")
-    escaped_sub = escape_ffmpeg_filter_path(primary_sub)
+
+    cleanup_temp_sub = False
+    actual_sub = primary_sub
+    if primary_sub.suffix.lower() in {".txt2", ".txt1", ".txt"}:
+        sub_fmt = _probe_sub_format(primary_sub) or "srt"
+        ext = ".vtt" if sub_fmt == "webvtt" else ".srt"
+        actual_sub = primary_sub.with_name(f"{primary_sub.stem}.burn_temp{ext}")
+        try:
+            shutil.copyfile(primary_sub, actual_sub)
+            cleanup_temp_sub = True
+        except OSError:
+            actual_sub = primary_sub
+
+    escaped_sub = escape_ffmpeg_filter_path(actual_sub)
 
     if has_libx264:
         video_codec_args = [
@@ -421,20 +584,77 @@ def burn_subtitle_into_video(
         str(temp_output),
     ]
 
-    res = subprocess.run(cmd, check=False)
-    if res.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size == 0:
-        try:
-            temp_output.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(f"ffmpeg failed while baking subtitles (exit code {res.returncode}).")
-
-    final_video = _replace_video_atomically(video_path, temp_output, ".mp4")
-    if not keep_srt:
-        for sub_path in all_sub_paths:
+    try:
+        res = subprocess.run(cmd, check=False)
+        if res.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size == 0:
             try:
-                sub_path.unlink(missing_ok=True)
+                temp_output.unlink(missing_ok=True)
             except OSError:
                 pass
-    return final_video
+            raise RuntimeError(f"ffmpeg failed while baking subtitles (exit code {res.returncode}).")
+
+        final_video = _replace_video_atomically(video_path, temp_output, ".mp4")
+        if not keep_srt:
+            for sub_path in all_sub_paths:
+                try:
+                    sub_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return final_video
+    finally:
+        if cleanup_temp_sub and actual_sub.is_file():
+            actual_sub.unlink(missing_ok=True)
+
+
+def find_local_mergeable_pairs(
+    target_path: Path,
+) -> list[tuple[Path, list[tuple[Path, str, str]]]]:
+    """Scan a file or directory for video files and their matching subtitle files.
+
+    Returns a list of:
+      (video_path, [(sub_path, lang_code, label), ...])
+    """
+    if not target_path.exists():
+        return []
+
+    results: list[tuple[Path, list[tuple[Path, str, str]]]] = []
+
+    if target_path.is_file():
+        folder = target_path.parent
+        if target_path.suffix.lower() in VIDEO_EXTENSIONS:
+            sub_matches = find_downloaded_subtitles(folder, target_path.stem)
+            if sub_matches:
+                sub_entries = [(p, lang, language_label(lang)) for p, lang in sub_matches]
+                results.append((target_path, sub_entries))
+        elif target_path.suffix.lower() in SUBTITLE_EXTENSIONS:
+            name_no_ext = target_path.stem
+            stem_parts = name_no_ext.rsplit(".", 1)
+            candidate_stems = [name_no_ext]
+            if len(stem_parts) == 2 and len(stem_parts[1]) in (2, 3):
+                candidate_stems.append(stem_parts[0])
+
+            for s in candidate_stems:
+                video_match = find_downloaded_video(folder, s)
+                if video_match:
+                    sub_matches = find_downloaded_subtitles(folder, video_match.stem)
+                    if sub_matches:
+                        sub_entries = [(p, lang, language_label(lang)) for p, lang in sub_matches]
+                        results.append((video_match, sub_entries))
+                    break
+    elif target_path.is_dir():
+        entries = sorted(target_path.iterdir(), key=lambda p: p.name)
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if (
+                entry.suffix.lower() in VIDEO_EXTENSIONS
+                and ".muxing." not in entry.name
+                and ".burning." not in entry.name
+            ):
+                sub_matches = find_downloaded_subtitles(target_path, entry.stem)
+                if sub_matches:
+                    sub_entries = [(p, lang, language_label(lang)) for p, lang in sub_matches]
+                    results.append((entry, sub_entries))
+
+    return results
 

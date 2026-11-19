@@ -25,6 +25,7 @@ from kisskh_app.subtitles_mux import (
     SUBTITLE_EXTENSIONS,
     VIDEO_EXTENSIONS,
     FfmpegCapabilities,
+    auto_decrypt_subtitle_file,
     burn_subtitle_into_video,
     detect_ffmpeg_capabilities,
     embed_subtitles_in_video,
@@ -674,17 +675,22 @@ class KissKHService:
     ) -> None:
         for sub in subtitles:
             try:
-                self.downloader.download_subtitles([sub], filepath_prefix, decrypter)
+                # Download raw subtitle first without risking decrypt failure during stream write
+                self.downloader.download_subtitles([sub], filepath_prefix, decrypter=None)
             except Exception as exc:
-                if decrypter is not None:
-                    # Subtitle file was already written raw before decrypt failure;
-                    # inform the user without discarding the episode download.
-                    emit(
-                        f"  [warn] Decryption failed for {sub.label} ({sub.land}): {exc}. "
-                        "Kept raw subtitle file."
-                    )
-                else:
-                    emit(f"  [warn] Failed downloading {sub.label} subtitle: {exc}")
+                emit(f"  [warn] Failed downloading {sub.label} subtitle: {exc}")
+                continue
+
+        # Automatically detect encryption (.txt2, .txt1, .txt) and decrypt in-place
+        prefix_path = Path(filepath_prefix)
+        target_dir = prefix_path.parent
+        stem_prefix = prefix_path.name
+        for sub_path, _ in find_downloaded_subtitles(target_dir, stem_prefix):
+            try:
+                if auto_decrypt_subtitle_file(sub_path):
+                    emit(f"  [ok] Decrypted subtitle: {sub_path.name}")
+            except Exception as exc:
+                emit(f"  [warn] Could not decrypt {sub_path.name}: {exc}")
 
     def close(self) -> None:
         self.api.cleanup()
